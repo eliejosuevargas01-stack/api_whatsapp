@@ -1,4 +1,0 @@
-{
-  "watch": ["src", "public"],
-  "ignore": ["sessions/*"]
-}
