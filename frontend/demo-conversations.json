@@ -1,0 +1,295 @@
+{
+  "note": "Conversas ficticias para demonstracao de como o agente atua em diferentes situacoes. Todas incluem botoes ou listas interativas.",
+  "conversations": [
+    {
+      "id": "juliana-lima",
+      "debtor": {
+        "name": "Juliana Lima",
+        "phone": "+55 11 98745-3321",
+        "amount": "R$ 520,00",
+        "due": "12/07/2024",
+        "profile": "Cliente recorrente"
+      },
+      "status": "pagou",
+      "summary": "Pagamento a vista com desconto de 20% confirmado.",
+      "recovered": "R$ 416,00",
+      "negotiation": "R$ 416,00",
+      "proposals": 1,
+      "messages": [
+        {
+          "sender": "agent",
+          "text": "Ola Juliana, tudo bem? Aqui e da Loja Vitoria. Identificamos um valor em aberto de R$ 520,00 referente a sua compra anterior. Gostariamos de ajudar a regularizar.",
+          "actions": {
+            "type": "buttons",
+            "title": "Como prefere seguir?",
+            "options": [
+              "Quero negociar agora",
+              "Quero receber proposta",
+              "Quero pagar a vista"
+            ]
+          }
+        },
+        {
+          "sender": "user",
+          "text": "Quero negociar agora."
+        },
+        {
+          "sender": "agent",
+          "text": "Entendo perfeitamente. Conseguimos liberar um desconto especial de 20% para pagamento a vista, ficando em R$ 416,00. Posso enviar o link de pagamento?",
+          "actions": {
+            "type": "buttons",
+            "title": "Escolha a melhor proposta",
+            "options": [
+              "Aceitar proposta a vista",
+              "Quero parcelar",
+              "Quero negociar outro valor"
+            ]
+          }
+        },
+        {
+          "sender": "user",
+          "text": "Aceitar proposta a vista."
+        },
+        {
+          "sender": "agent",
+          "text": "Perfeito. Envio o link agora. Assim que o pagamento for confirmado, a pendencia e baixada automaticamente.",
+          "actions": {
+            "type": "buttons",
+            "title": "Proximos passos",
+            "options": [
+              "Confirmar pagamento",
+              "Enviar comprovante",
+              "Gerar novo link"
+            ]
+          }
+        },
+        {
+          "sender": "user",
+          "text": "Confirmar pagamento."
+        },
+        {
+          "sender": "agent",
+          "text": "Pagamento confirmado. Obrigado por regularizar. Se precisar, estou a disposicao."
+        }
+      ]
+    },
+    {
+      "id": "carlos-mota",
+      "debtor": {
+        "name": "Carlos Mota",
+        "phone": "+55 11 99612-8844",
+        "amount": "R$ 1.240,00",
+        "due": "05/07/2024",
+        "profile": "Cliente eventual"
+      },
+      "status": "acordo aceito",
+      "summary": "Acordo parcelado em 4x confirmado, primeira parcela registrada.",
+      "recovered": "R$ 310,00",
+      "negotiation": "R$ 1.240,00",
+      "proposals": 2,
+      "messages": [
+        {
+          "sender": "agent",
+          "text": "Ola Carlos, tudo bem? Aqui e da Loja Vitoria. Consta um debito de R$ 1.240,00. Queremos entender como podemos ajudar a regularizar.",
+          "actions": {
+            "type": "buttons",
+            "title": "Escolha uma opcao",
+            "options": [
+              "Quero negociar parcelamento",
+              "Quero proposta a vista",
+              "Quero pagar a primeira parcela"
+            ]
+          }
+        },
+        {
+          "sender": "user",
+          "text": "Quero negociar parcelamento."
+        },
+        {
+          "sender": "agent",
+          "text": "Sem problema. Podemos parcelar em ate 6x de R$ 206,66, sem entrada. Funciona melhor para voce?",
+          "actions": {
+            "type": "list",
+            "title": "Selecione o plano",
+            "options": [
+              "Aceitar 6x de R$ 206,66",
+              "Aceitar 4x de R$ 310,00",
+              "Quero outra proposta"
+            ]
+          }
+        },
+        {
+          "sender": "user",
+          "text": "Aceitar 4x de R$ 310,00."
+        },
+        {
+          "sender": "agent",
+          "text": "Perfeito. Vou registrar em 4x de R$ 310,00 e enviar o link da primeira parcela.",
+          "actions": {
+            "type": "buttons",
+            "title": "Confirmacao",
+            "options": [
+              "Confirmar acordo",
+              "Pagar primeira parcela",
+              "Gerar link de pagamento"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "renata-azevedo",
+      "debtor": {
+        "name": "Renata Azevedo",
+        "phone": "+55 21 98877-4412",
+        "amount": "R$ 890,00",
+        "due": "28/06/2024",
+        "profile": "Sem retorno inicial"
+      },
+      "status": "em contato",
+      "summary": "Contato inicial realizado. Follow-up enviado e aguardando retorno.",
+      "recovered": "R$ 0,00",
+      "negotiation": "R$ 890,00",
+      "proposals": 1,
+      "messages": [
+        {
+          "sender": "agent",
+          "text": "Ola Renata, tudo bem? Estamos entrando em contato para tratar um valor em aberto de R$ 890,00 com a Loja Vitoria. Podemos conversar sobre formas de pagamento?",
+          "actions": {
+            "type": "list",
+            "title": "Como prefere seguir?",
+            "options": [
+              "Quero negociar agora",
+              "Quero proposta a vista",
+              "Quero agendar pagamento"
+            ]
+          }
+        },
+        {
+          "sender": "agent",
+          "text": "Oi Renata. Seguimos a disposicao para facilitar a regularizacao, inclusive com opcoes de parcelamento.",
+          "actions": {
+            "type": "buttons",
+            "title": "Responder rapido",
+            "options": [
+              "Quero o link para pagar",
+              "Quero parcelar",
+              "Agendar para a proxima semana"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "paulo-henrique-alves",
+      "debtor": {
+        "name": "Paulo Henrique Alves",
+        "phone": "+55 31 99771-2209",
+        "amount": "R$ 320,50",
+        "due": "02/07/2024",
+        "profile": "Recusa educada"
+      },
+      "status": "sem acordo",
+      "summary": "Cliente informou que nao pode regularizar no momento. Retorno agendado.",
+      "recovered": "R$ 0,00",
+      "negotiation": "R$ 320,50",
+      "proposals": 0,
+      "messages": [
+        {
+          "sender": "agent",
+          "text": "Ola Paulo, tudo bem? Identificamos um valor em aberto de R$ 320,50. Posso apresentar opcoes para regularizacao?",
+          "actions": {
+            "type": "buttons",
+            "title": "Escolha uma opcao",
+            "options": [
+              "Quero negociar pagamento",
+              "Quero proposta a vista",
+              "Quero parcelar"
+            ]
+          }
+        },
+        {
+          "sender": "user",
+          "text": "No momento nao tenho condicoes de pagar."
+        },
+        {
+          "sender": "agent",
+          "text": "Compreendo. Vou registrar que voce nao pode regularizar agora e manteremos o contato em outro momento. Obrigado pela resposta.",
+          "actions": {
+            "type": "buttons",
+            "title": "Preferencias",
+            "options": [
+              "Agendar pagamento em 30 dias",
+              "Agendar pagamento em 60 dias",
+              "Retomar proposta mais tarde"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "aline-souza",
+      "debtor": {
+        "name": "Aline Souza",
+        "phone": "+55 11 98888-0000",
+        "amount": "R$ 5.500,00",
+        "due": "05/01/2026",
+        "profile": "Cliente antigo"
+      },
+      "status": "negociacao avancada",
+      "summary": "Entrada confirmada e parcelas agendadas para os proximos meses.",
+      "recovered": "R$ 1.500,00",
+      "negotiation": "R$ 5.500,00",
+      "proposals": 2,
+      "messages": [
+        {
+          "sender": "agent",
+          "text": "Ola Aline, tudo bem? Aqui e da Loja Vitoria. Identificamos um valor em aberto de R$ 5.500,00. Queremos ajudar a regularizar de forma confortavel.",
+          "actions": {
+            "type": "buttons",
+            "title": "Escolha uma opcao",
+            "options": [
+              "Quero negociar entrada + parcelas",
+              "Quero parcelar sem entrada",
+              "Quero proposta a vista"
+            ]
+          }
+        },
+        {
+          "sender": "user",
+          "text": "Quero negociar entrada + parcelas."
+        },
+        {
+          "sender": "agent",
+          "text": "Sem problema. Podemos fazer entrada de R$ 1.500,00 + 4x de R$ 1.000,00, sem juros adicionais. Funciona para voce?",
+          "actions": {
+            "type": "list",
+            "title": "Confirmar acordo",
+            "options": [
+              "Aceitar proposta",
+              "Negociar entrada menor",
+              "Quero outra proposta"
+            ]
+          }
+        },
+        {
+          "sender": "user",
+          "text": "Aceitar proposta."
+        },
+        {
+          "sender": "agent",
+          "text": "Perfeito. Vou registrar o acordo e enviar o link da entrada.",
+          "actions": {
+            "type": "buttons",
+            "title": "Proximos passos",
+            "options": [
+              "Confirmar acordo",
+              "Pagar entrada agora",
+              "Gerar novo link"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

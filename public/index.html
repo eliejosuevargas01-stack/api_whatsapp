@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>EVA Control Panel</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Painel de Operacoes</p>
+          <h1>EVA WhatsApp</h1>
+          <p class="subtitle">
+            Conecte a sessao, leia o QR Code e configure o webhook do n8n em um so lugar.
+          </p>
+        </div>
+        <div class="status-card" id="statusCard">
+          <div>
+            <p class="label">Status da sessao</p>
+            <p class="status" id="sessionStatus">Desconectado</p>
+          </div>
+          <div class="pulse" aria-hidden="true"></div>
+        </div>
+      </header>
+
+      <nav class="tab-bar">
+        <button class="tab active" data-tab="ops">Operacoes</button>
+        <button class="tab" data-tab="chat">Chat</button>
+      </nav>
+
+      <main class="grid" data-page="ops">
+        <section class="panel qr-panel">
+          <div class="panel-head">
+            <h2>QR Code</h2>
+            <div class="panel-actions">
+              <button class="ghost" id="refreshStatus">Atualizar</button>
+              <button class="ghost danger" id="disconnectSession">Desconectar</button>
+            </div>
+          </div>
+          <div class="qr-wrapper">
+            <div class="qr-frame" id="qrFrame">
+              <span class="qr-placeholder">Aguardando QR Code...</span>
+            </div>
+          </div>
+          <div class="hint">
+            Abra o WhatsApp, toque em Aparelhos conectados e escaneie o QR.
+          </div>
+        </section>
+
+        <section class="panel webhook-panel">
+          <div class="panel-head">
+            <h2>Webhook n8n</h2>
+            <p class="muted">Configure para receber mensagens no fluxo.</p>
+          </div>
+          <form id="webhookForm" class="stack">
+            <label>
+              URL do webhook
+              <input type="url" name="webhookUrl" placeholder="https://n8n.exemplo/webhook/..." required />
+            </label>
+            <label>
+              Secret (opcional)
+              <input type="text" name="webhookSecret" placeholder="Seu segredo" />
+            </label>
+            <label>
+              Filtro de mensagens
+              <select name="webhookFilterMode">
+                <option value="all">Tudo (contatos + grupos)</option>
+                <option value="contacts_only">Somente contatos</option>
+                <option value="groups_allowlist">Somente grupos especificos</option>
+              </select>
+            </label>
+            <label class="allowlist hidden" id="allowlistField">
+              JIDs de grupos permitidos (um por linha)
+              <textarea name="webhookGroupAllowlist" rows="4" placeholder="1203630xxxx@g.us"></textarea>
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" name="webhookIgnoreFromMe" />
+              Ignorar mensagens enviadas por mim
+            </label>
+            <button type="submit">Salvar configuracao</button>
+            <p class="small" id="webhookFeedback"></p>
+          </form>
+        </section>
+
+        <section class="panel settings-panel">
+          <div class="panel-head">
+            <h2>Configuracoes</h2>
+            <p class="muted">Defina o endpoint da API e a sua API Key.</p>
+          </div>
+          <form id="settingsForm" class="stack">
+            <label>
+              Base URL da API
+              <input type="url" name="baseUrl" placeholder="http://localhost:3000" required />
+            </label>
+            <label>
+              API Key
+              <input type="password" name="apiKey" placeholder="SUA_API_KEY" required />
+            </label>
+            <div class="two">
+              <label>
+                Auto refresh (seg)
+                <input type="number" name="refreshInterval" min="5" max="120" value="15" />
+              </label>
+              <label>
+                Tema do painel
+                <select name="theme">
+                  <option value="sunset">Sunset</option>
+                  <option value="coast">Coast</option>
+                  <option value="citrus">Citrus</option>
+                </select>
+              </label>
+            </div>
+            <button type="submit">Aplicar</button>
+            <p class="small" id="settingsFeedback"></p>
+          </form>
+        </section>
+      </main>
+
+      <section class="chat-view" data-page="chat">
+        <aside class="chat-sidebar">
+          <div class="sidebar-head">
+            <h2>Conversas</h2>
+            <button class="ghost" id="refreshConversations">Atualizar</button>
+          </div>
+          <div class="conversation-list" id="conversationList"></div>
+        </aside>
+        <div class="chat-panel">
+          <div class="chat-header">
+            <div>
+              <p class="label">Contato</p>
+              <h3 id="chatTitle">Selecione uma conversa</h3>
+            </div>
+            <span class="muted" id="chatMeta"></span>
+          </div>
+          <div class="chat-messages" id="chatMessages">
+            <p class="empty">Sem mensagens para mostrar.</p>
+          </div>
+          <form class="chat-input" id="chatForm">
+            <input type="text" name="message" placeholder="Digite sua mensagem..." required />
+            <button type="submit">Enviar</button>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

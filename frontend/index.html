@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Plataforma CDL - Painel Demo Executivo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+      integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2CeOea8d2g9xru8wXw3KjXJ0w0h2Q2Z2p3p8DTR3Yd1rlLzO6C0o6y+AAw=="
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <header class="topbar">
+        <div class="brand">
+          <p class="eyebrow">painel demo executivo</p>
+          <h1>Plataforma de Recuperacao de Credito Inteligente - CDL</h1>
+          <p class="subtitle">
+            Recuperacao automatica de inadimplencia via WhatsApp, com transparencia e divisao de receita
+          </p>
+        </div>
+        <div class="topbar-actions">
+          <button class="ghost">Modo demo ativo</button>
+          <button class="primary">Ver impacto financeiro</button>
+        </div>
+      </header>
+
+      <main class="dashboard">
+        <section class="overview" id="visao-geral">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">visao geral</p>
+              <h2>Resultados imediatos em escala</h2>
+            </div>
+            <p class="section-note">
+              Valores recuperados automaticamente sem call center ou custo fixo.
+            </p>
+          </div>
+          <div class="kpi-grid">
+            <article class="kpi-card card highlight" style="--delay: 0.05s">
+              <p class="kpi-label">Carteira total em cobranca</p>
+              <p class="kpi-value">R$ 12,4 mi</p>
+              <p class="kpi-meta">1.840 clientes inadimplentes ativos</p>
+            </article>
+            <article class="kpi-card card" style="--delay: 0.1s">
+              <p class="kpi-label">Valor ja recuperado</p>
+              <p class="kpi-value positive">R$ 3,1 mi</p>
+              <p class="kpi-meta">Ultimos 90 dias</p>
+            </article>
+            <article class="kpi-card card" style="--delay: 0.15s">
+              <p class="kpi-label">Valor em negociacao</p>
+              <p class="kpi-value">R$ 1,8 mi</p>
+              <p class="kpi-meta">Acordos em andamento</p>
+            </article>
+            <article class="kpi-card card" style="--delay: 0.2s">
+              <p class="kpi-label">Taxa media de recuperacao</p>
+              <p class="kpi-value">38%</p>
+              <p class="kpi-meta">Indicador medio por campanha</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="flow" id="como-funciona">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">processo</p>
+              <h2>Como o sistema funciona</h2>
+            </div>
+            <p class="section-note">Todo o processo e rastreavel e controlado.</p>
+          </div>
+          <div class="flow-steps">
+            <div class="flow-step" style="--delay: 0.05s">
+              <div class="step-icon"><i class="fa-solid fa-file-invoice-dollar"></i></div>
+              <p class="step-title">Lojista envia lista de devedores</p>
+              <p class="step-meta">Importacao simples da carteira</p>
+            </div>
+            <div class="flow-step" style="--delay: 0.1s">
+              <div class="step-icon"><i class="fa-solid fa-comments-dollar"></i></div>
+              <p class="step-title">Sistema negocia via WhatsApp</p>
+              <p class="step-meta">Contato etico e profissional</p>
+            </div>
+            <div class="flow-step" style="--delay: 0.15s">
+              <div class="step-icon"><i class="fa-solid fa-shield-halved"></i></div>
+              <p class="step-title">Acordos registrados e auditaveis</p>
+              <p class="step-meta">Transparencia total</p>
+            </div>
+            <div class="flow-step" style="--delay: 0.2s">
+              <div class="step-icon"><i class="fa-solid fa-credit-card"></i></div>
+              <p class="step-title">Pagamentos realizados</p>
+              <p class="step-meta">Recuperacao imediata</p>
+            </div>
+            <div class="flow-step" style="--delay: 0.25s">
+              <div class="step-icon"><i class="fa-solid fa-sack-dollar"></i></div>
+              <p class="step-title">Receita distribuida automaticamente</p>
+              <p class="step-meta">CDL e lojista ganham juntos</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="merchant" id="painel-lojista">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">painel do lojista</p>
+              <h2>Controle e transparencia da recuperacao</h2>
+            </div>
+            <p class="section-note">
+              Cada regra define quanto dinheiro retorna para a loja.
+            </p>
+          </div>
+          <div class="merchant-grid">
+            <article class="card rules">
+              <div class="card-head">
+                <div>
+                  <p class="eyebrow">regras de negociacao</p>
+                  <h3>Regras de Negociacao</h3>
+                </div>
+                <span class="chip">parametros ativos</span>
+              </div>
+              <form id="debtor-form">
+                <div class="rules-grid">
+                  <div class="field">
+                    <label for="merchant-discount-min">Desconto minimo</label>
+                    <input
+                      id="merchant-discount-min"
+                      name="discount_min"
+                      type="text"
+                      placeholder="Ex: 10%"
+                      value="10%"
+                      required
+                    />
+                  </div>
+                  <div class="field">
+                    <label for="merchant-discount-max">Desconto maximo</label>
+                    <input
+                      id="merchant-discount-max"
+                      name="discount_max"
+                      type="text"
+                      placeholder="Ex: 30%"
+                      value="30%"
+                      required
+                    />
+                  </div>
+                  <div class="field">
+                    <label for="debtor-offer">Tipos de acordo permitidos</label>
+                    <select id="debtor-offer" name="offer" required>
+                      <option value="">Escolher proposta</option>
+                      <option value="vista">Desconto a vista</option>
+                      <option value="parcelado" selected>Parcelamento em ate 6x</option>
+                      <option value="entrada">Entrada + parcelas</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="merchant-tone">Tom da conversa</label>
+                    <select id="merchant-tone" name="tone" required>
+                      <option value="cordial" selected>Profissional e cordial</option>
+                      <option value="direto">Objetivo e direto</option>
+                      <option value="premium">Relacionamento premium</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label for="merchant-roi">Limite minimo de retorno (ROI)</label>
+                    <input
+                      id="merchant-roi"
+                      name="roi"
+                      type="text"
+                      placeholder="Ex: 1,5x"
+                      value="1,8x"
+                      required
+                    />
+                  </div>
+                  <div class="field">
+                    <label for="merchant-discount">Desconto alvo</label>
+                    <input
+                      id="merchant-discount"
+                      name="discount"
+                      type="text"
+                      placeholder="Ex: 20%"
+                      value="20%"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div class="form-divider">
+                  <span>Entrada na carteira</span>
+                </div>
+
+                <div class="debtor-grid">
+                  <div class="field">
+                    <label for="debtor-name">Nome do devedor</label>
+                    <input
+                      id="debtor-name"
+                      name="name"
+                      type="text"
+                      placeholder="Ex: Ana Soares"
+                      value="Aline Souza"
+                      required
+                    />
+                  </div>
+                  <div class="field">
+                    <label for="debtor-phone">WhatsApp</label>
+                    <input
+                      id="debtor-phone"
+                      name="phone"
+                      type="tel"
+                      placeholder="Ex: +55 11 98888-0000"
+                      value="+55 11 98888-0000"
+                      required
+                    />
+                  </div>
+                  <div class="field">
+                    <label for="debtor-amount">Valor da divida</label>
+                    <input
+                      id="debtor-amount"
+                      name="amount"
+                      type="text"
+                      placeholder="Ex: R$ 780,00"
+                      value="R$ 5.500,00"
+                      required
+                    />
+                  </div>
+                  <div class="field">
+                    <label for="debtor-due">Vencimento</label>
+                    <input id="debtor-due" name="due" type="date" value="2026-01-05" required />
+                  </div>
+                  <div class="field full">
+                    <label for="debtor-notes">Observacoes comerciais</label>
+                    <textarea
+                      id="debtor-notes"
+                      name="notes"
+                      rows="3"
+                      placeholder="Ex: cliente recorrente, prefere contato a tarde"
+                    >Cliente recorrente, prefere contato a tarde.</textarea>
+                  </div>
+                </div>
+
+                <button type="submit" class="primary full">Adicionar a carteira</button>
+              </form>
+            </article>
+
+            <article class="card list">
+              <div class="card-head">
+                <div>
+                  <p class="eyebrow">carteira em recuperacao</p>
+                  <h3>Carteira em Recuperacao</h3>
+                </div>
+                <span class="chip">0 em acompanhamento</span>
+              </div>
+              <div class="list-body" id="debtors-list">
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="proof" id="demonstracao">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">prova de funcionamento</p>
+              <h2>Demonstracao de Negociacao Real</h2>
+            </div>
+            <p class="section-note">
+              Conversas ficticias para demonstracao, com propostas claras e resultado final em destaque.
+            </p>
+          </div>
+          <div class="proof-grid">
+            <article class="card chat">
+              <div class="card-head">
+                <div>
+                  <p class="eyebrow">conversa ao vivo</p>
+                  <h3>Demonstracao de Negociacao Real</h3>
+                </div>
+                <span class="chip">WhatsApp</span>
+              </div>
+              <div class="chat-window">
+                <div class="chat-meta">
+                  <div>
+                    <p class="value" id="chatDebtorName">Devedor: -</p>
+                    <p class="meta" id="chatDebtorMeta">Aguardando inicio da negociacao</p>
+                  </div>
+                  <div class="deal-outcome">
+                    <div class="deal-item">
+                      <span class="deal-label">Status final</span>
+                      <span class="status info" id="chatStatus">em contato</span>
+                    </div>
+                    <div class="deal-item highlight">
+                      <span class="deal-label">Valor recuperado</span>
+                      <span class="deal-value" id="chatRecovered">R$ 0,00</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="chat-bubbles" id="chatBubbles">
+                  <div class="chat-empty" id="chatEmpty">
+                    <p class="value">Nenhuma negociacao carregada</p>
+                    <p class="meta">Selecione um devedor para visualizar a conversa.</p>
+                  </div>
+                </div>
+                <div class="chat-summary">
+                  <p class="label">Resumo da negociacao</p>
+                  <p class="summary-text" id="chatSummary">Aguardando andamento da negociacao.</p>
+                </div>
+                <form class="chat-reply" id="replyForm">
+                  <input id="replyInput" type="text" placeholder="Registrar resposta manual (demo)" />
+                  <button type="submit" class="ghost">Registrar resposta</button>
+                </form>
+              </div>
+            </article>
+
+            <article class="card timeline logs">
+              <div class="card-head">
+                <div>
+                  <p class="eyebrow">linha do tempo</p>
+                  <h3>Linha do Tempo da Negociacao</h3>
+                </div>
+                <span class="chip">rastreio completo</span>
+              </div>
+              <div class="logs-section">
+                <div class="debtor-info" id="debtorInfoPanel">
+                  <div class="info-row">
+                    <span class="info-label">Devedor:</span>
+                    <span class="info-value" id="logDebtorName">-</span>
+                  </div>
+                  <div class="info-row">
+                    <span class="info-label">WhatsApp:</span>
+                    <span class="info-value" id="logDebtorPhone">-</span>
+                  </div>
+                  <div class="info-row">
+                    <span class="info-label">Valor em aberto:</span>
+                    <span class="info-value" id="logDebtAmount">-</span>
+                  </div>
+                  <div class="info-row">
+                    <span class="info-label">Status:</span>
+                    <span class="info-value" id="logStatus">Aguardando inicio</span>
+                  </div>
+                </div>
+
+                <div class="stats-container">
+                  <div class="stat-card">
+                    <div class="stat-value" id="statMessages">0</div>
+                    <div class="stat-label">Interacoes</div>
+                  </div>
+                  <div class="stat-card">
+                    <div class="stat-value" id="statProposals">0</div>
+                    <div class="stat-label">Propostas</div>
+                  </div>
+                </div>
+
+                <h3 class="section-title compact">Historico da negociacao</h3>
+
+                <div class="logs-container" id="logsContainer">
+                  <button class="log-item info" type="button">
+                    <div class="log-time">09:00:00</div>
+                    <div class="log-message">
+                      Demonstracao pronta. Selecione um devedor para ver os detalhes.
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="cdl-view" id="visao-cdl">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">visao cdl</p>
+              <h2>Painel Executivo da CDL</h2>
+            </div>
+            <p class="section-note">
+              A CDL nao opera cobrancas. Apenas acompanha resultados e recebe participacao.
+            </p>
+          </div>
+
+          <div class="cdl-kpis">
+            <article class="kpi-card card" style="--delay: 0.05s">
+              <p class="kpi-label">Total negociado por todos os lojistas</p>
+              <p class="kpi-value">R$ 9,6 mi</p>
+              <p class="kpi-meta">Consolidado mensal</p>
+            </article>
+            <article class="kpi-card card" style="--delay: 0.1s">
+              <p class="kpi-label">Total recuperado</p>
+              <p class="kpi-value positive">R$ 3,1 mi</p>
+              <p class="kpi-meta">Recebimentos confirmados</p>
+            </article>
+            <article class="kpi-card card" style="--delay: 0.15s">
+              <p class="kpi-label">Receita da CDL</p>
+              <p class="kpi-value">R$ 93 mil</p>
+              <p class="kpi-meta">Participacao media de 3%</p>
+            </article>
+            <article class="kpi-card card" style="--delay: 0.2s">
+              <p class="kpi-label">Projecao mensal</p>
+              <p class="kpi-value">R$ 48 mil</p>
+              <p class="kpi-meta">Expansao para 60 lojistas</p>
+            </article>
+          </div>
+
+          <div class="card cdl-table">
+            <div class="table-head">
+              <h3>Resumo por lojista</h3>
+              <span class="chip">amostra de 6 lojas</span>
+            </div>
+            <div class="table-grid">
+              <div class="table-row header">
+                <span>Lojista</span>
+                <span>Valor em cobranca</span>
+                <span>Valor recuperado</span>
+                <span>Receita para CDL</span>
+              </div>
+              <div class="table-row">
+                <span>Loja Vitoria</span>
+                <span>R$ 84.500</span>
+                <span>R$ 18.920</span>
+                <span>R$ 567</span>
+              </div>
+              <div class="table-row">
+                <span>Moda Central</span>
+                <span>R$ 120.300</span>
+                <span>R$ 42.100</span>
+                <span>R$ 1.263</span>
+              </div>
+              <div class="table-row">
+                <span>AutoPecas Lima</span>
+                <span>R$ 96.700</span>
+                <span>R$ 31.500</span>
+                <span>R$ 945</span>
+              </div>
+              <div class="table-row">
+                <span>Farmacia Horizonte</span>
+                <span>R$ 65.200</span>
+                <span>R$ 22.400</span>
+                <span>R$ 672</span>
+              </div>
+              <div class="table-row">
+                <span>Casa &amp; Estilo</span>
+                <span>R$ 142.900</span>
+                <span>R$ 56.300</span>
+                <span>R$ 1.689</span>
+              </div>
+              <div class="table-row">
+                <span>Super Bom Preco</span>
+                <span>R$ 210.000</span>
+                <span>R$ 74.800</span>
+                <span>R$ 2.244</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="revenue" id="modelo-receita">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">modelo de receita</p>
+              <h2>Distribuicao clara dos ganhos</h2>
+            </div>
+            <p class="section-note">Todos ganham apenas quando o dinheiro e recuperado.</p>
+          </div>
+
+          <div class="card revenue-card">
+            <div class="revenue-bar">
+              <div class="revenue-segment lojista" style="--size: 90">90% Lojista</div>
+              <div class="revenue-segment operacao" style="--size: 5">5% Operacao</div>
+              <div class="revenue-segment cdl" style="--size: 3">3% CDL</div>
+              <div class="revenue-segment parceiro" style="--size: 2">2% Parceiro</div>
+            </div>
+            <div class="revenue-legend">
+              <div class="legend-item"><span class="dot lojista"></span>90% Lojista</div>
+              <div class="legend-item"><span class="dot operacao"></span>5% Operacao / Tecnologia</div>
+              <div class="legend-item"><span class="dot cdl"></span>3% CDL</div>
+              <div class="legend-item"><span class="dot parceiro"></span>2% Parceiro</div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
