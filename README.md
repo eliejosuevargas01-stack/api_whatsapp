@@ -3,10 +3,13 @@
 Aplicacao unica com:
 
 - API Fastify em `/api/*`
-- painel local simples em `/`
+- painel de conversas em `/`
+- painel de sessoes e configuracoes em `/sessoes`
 - multiplas sessoes/dispositivos de WhatsApp
 - QR Code por sessao
 - historico de conversas por sessao
+- envio e leitura de midia
+- webhook configuravel pelo painel
 
 ## Requisitos
 
@@ -29,6 +32,14 @@ Use `.env.example` como base:
 - `DATA_DIR`
 - `MEDIA_DIR`
 - `MAX_STORED_MESSAGES` (`0` = sem limite)
+- `WEBHOOK_ENABLED`
+- `WEBHOOK_URL`
+- `WEBHOOK_SECRET`
+- `WEBHOOK_PRIVATE`
+- `WEBHOOK_GROUPS`
+- `WEBHOOK_NEWSLETTERS`
+- `WEBHOOK_BROADCASTS`
+- `WEBHOOK_FROM_ME`
 - `LOG_LEVEL`
 
 ## Rodando localmente
@@ -39,7 +50,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Abra `http://localhost:3000`.
+Abra `http://localhost:3000` para conversas e `http://localhost:3000/sessoes` para QR Code e configuracoes.
 
 ## Estrutura de dados
 
@@ -47,6 +58,7 @@ Abra `http://localhost:3000`.
 - `data/sessions.json`: metadados das sessoes
 - `data/conversations.json`: resumo das conversas por sessao
 - `data/messages.json`: historico de mensagens por sessao
+- `data/settings.json`: webhook e filtros de entrega
 - `data/media/`: cache local de imagens, videos, audios, stickers e documentos
 
 ## Endpoints principais
@@ -54,6 +66,8 @@ Abra `http://localhost:3000`.
 - `GET /api/health`
 - `GET /api/bootstrap`
 - `GET /api/status`
+- `GET /api/settings`
+- `PUT /api/settings`
 - `GET /api/sessions`
 - `POST /api/sessions`
 - `GET /api/sessions/:sessionId`
@@ -62,5 +76,7 @@ Abra `http://localhost:3000`.
 - `POST /api/sessions/:sessionId/logout`
 - `GET /api/sessions/:sessionId/conversations`
 - `GET /api/sessions/:sessionId/conversations/:jid/messages`
+- `POST /api/sessions/:sessionId/conversations/:jid/history`
 - `POST /api/sessions/:sessionId/conversations/:jid/read`
 - `POST /api/sessions/:sessionId/messages/send`
+- `GET /api/sessions/:sessionId/media`

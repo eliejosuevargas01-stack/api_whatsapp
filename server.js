@@ -55,10 +55,28 @@ const config = {
   mediaDir: path.resolve(process.env.MEDIA_DIR || path.join(__dirname, "data", "media")),
 };
 
+function getDefaultSettingsStore() {
+  const webhookUrl = String(process.env.WEBHOOK_URL || "").trim();
+
+  return normalizeSettingsStore({
+    webhook: {
+      enabled: parseBoolean(process.env.WEBHOOK_ENABLED, Boolean(webhookUrl)),
+      url: webhookUrl,
+      secret: String(process.env.WEBHOOK_SECRET || "").trim(),
+      allowPrivate: parseBoolean(process.env.WEBHOOK_PRIVATE, true),
+      allowGroups: parseBoolean(process.env.WEBHOOK_GROUPS, true),
+      allowNewsletters: parseBoolean(process.env.WEBHOOK_NEWSLETTERS, false),
+      allowBroadcasts: parseBoolean(process.env.WEBHOOK_BROADCASTS, false),
+      includeFromMe: parseBoolean(process.env.WEBHOOK_FROM_ME, false),
+    },
+  });
+}
+
 const paths = {
   messages: path.join(config.dataDir, "messages.json"),
   conversations: path.join(config.dataDir, "conversations.json"),
   sessions: path.join(config.dataDir, "sessions.json"),
+  settings: path.join(config.dataDir, "settings.json"),
 };
 
 const app = Fastify({
@@ -81,6 +99,7 @@ const stores = {
     migratedLegacySessionId || DEFAULT_SESSION_ID,
   ),
   sessions: normalizeSessionStore(await readJson(paths.sessions, { sessions: {} })),
+  settings: normalizeSettingsStore(await readJson(paths.settings, getDefaultSettingsStore())),
 };
 
 const knownSessionIds = new Set([
@@ -106,12 +125,14 @@ rebuildConversationsFromMessages(stores);
 const writeMessages = createJsonWriter(paths.messages, app.log);
 const writeConversations = createJsonWriter(paths.conversations, app.log);
 const writeSessions = createJsonWriter(paths.sessions, app.log);
+const writeSettings = createJsonWriter(paths.settings, app.log);
 
 const persistMessages = () => writeMessages(stores.messages);
 const persistConversations = () => writeConversations(stores.conversations);
 const persistSessions = () => writeSessions(stores.sessions);
+const persistSettings = () => writeSettings(stores.settings);
 
-await Promise.all([persistMessages(), persistConversations(), persistSessions()]);
+await Promise.all([persistMessages(), persistConversations(), persistSessions(), persistSettings()]);
 
 const messageIndex = new Set(
   stores.messages.messages.map((message) => getMessageSignature(message)),
@@ -125,6 +146,7 @@ const sessionManager = createSessionManager({
   persistMessages,
   persistConversations,
   persistSessions,
+  persistSettings,
 });
 
 app.register(rateLimit, {
@@ -161,6 +183,27 @@ app.get("/api/status", async () => ({
   totals: getGlobalStats(stores),
   sessions: sessionManager.listSessions(),
 }));
+
+app.get("/api/settings", async () => ({
+  settings: stores.settings,
+}));
+
+app.put("/api/settings", async (request, reply) => {
+  try {
+    stores.settings = mergeSettingsStore(stores.settings, request.body);
+    await persistSettings();
+
+    return {
+      ok: true,
+      settings: stores.settings,
+    };
+  } catch (error) {
+    return reply.code(400).send({
+      error: "bad_request",
+      message: errorToMessage(error) || "Nao foi possivel salvar as configuracoes.",
+    });
+  }
+});
 
 app.get("/api/sessions", async () => ({
   sessions: sessionManager.listSessions(),
@@ -528,6 +571,89 @@ function createSessionManager({
   const services = new Map();
   const logger = Pino({ level: "silent" });
 
+  const shouldDeliverWebhookForMessage = (message) => {
+    const webhook = stores.settings?.webhook || {};
+
+    if (!webhook.enabled || !webhook.url) {
+      return false;
+    }
+
+    const kind = getConversationKind(message?.jid || "");
+
+    if (message?.fromMe && !webhook.includeFromMe) {
+      return false;
+    }
+
+    if (kind === "group") {
+      return Boolean(webhook.allowGroups);
+    }
+
+    if (kind === "newsletter") {
+      return Boolean(webhook.allowNewsletters);
+    }
+
+    if (kind === "broadcast") {
+      return Boolean(webhook.allowBroadcasts);
+    }
+
+    return Boolean(webhook.allowPrivate);
+  };
+
+  const dispatchWebhookMessage = async (sessionId, message) => {
+    if (!shouldDeliverWebhookForMessage(message)) {
+      return;
+    }
+
+    const webhook = stores.settings.webhook;
+    const conversation =
+      getConversationMeta(stores, sessionId, message.jid) || normalizeConversationEntry({}, message.jid);
+    const session = stores.sessions.sessions[sessionId] || ensureSessionMeta(stores.sessions, sessionId);
+    const payload = {
+      event: "message.created",
+      emittedAt: new Date().toISOString(),
+      session: {
+        id: session.id,
+        name: session.name,
+      },
+      conversation: buildConversationSummary(conversation),
+      message: serializeMessageForClient(sessionId, message),
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 10000);
+
+    try {
+      const response = await fetch(webhook.url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-WhatsApp-Event": payload.event,
+          "X-WhatsApp-Session": sessionId,
+          ...(webhook.secret ? { "X-Webhook-Secret": webhook.secret } : {}),
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        app.log.warn(
+          {
+            sessionId,
+            statusCode: response.status,
+            webhookUrl: webhook.url,
+          },
+          "Webhook respondeu com status nao esperado.",
+        );
+      }
+    } catch (error) {
+      app.log.warn({ error, sessionId, webhookUrl: webhook.url }, "Falha ao entregar webhook.");
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
   const trimMessagesStore = () => {
     if (stores.messages.messages.length <= config.maxStoredMessages) {
       return;
@@ -790,7 +916,16 @@ function createSessionManager({
           continue;
         }
 
-        recordMessage(sessionId, normalizedMessage);
+        const signature = getMessageSignature({
+          ...normalizedMessage,
+          sessionId,
+        });
+        const isNewMessage = !messageIndex.has(signature);
+        const storedMessage = recordMessage(sessionId, normalizedMessage);
+
+        if (isNewMessage) {
+          void dispatchWebhookMessage(sessionId, storedMessage);
+        }
       }
     };
 
@@ -959,8 +1094,7 @@ function createSessionManager({
 
       const jid = normalizeJidInput(jidInput);
       const response = await state.socket.sendMessage(jid, { text });
-
-      return recordMessage(sessionId, {
+      const storedMessage = recordMessage(sessionId, {
         id: response?.key?.id || `local_${Date.now()}`,
         jid,
         fromMe: true,
@@ -972,6 +1106,10 @@ function createSessionManager({
         participant: null,
         media: null,
       });
+
+      void dispatchWebhookMessage(sessionId, storedMessage);
+
+      return storedMessage;
     };
 
     const sendMedia = async (jidInput, payload) => {
@@ -993,7 +1131,7 @@ function createSessionManager({
           })
         : null;
 
-      return recordMessage(sessionId, {
+      const storedMessage = recordMessage(sessionId, {
         id: messageId,
         jid,
         fromMe: true,
@@ -1005,6 +1143,10 @@ function createSessionManager({
         participant: null,
         media: buildOutgoingStoredMedia(payload.media, cachedMedia),
       });
+
+      void dispatchWebhookMessage(sessionId, storedMessage);
+
+      return storedMessage;
     };
 
     const resolveMessageMedia = async (message) => {
@@ -2231,6 +2373,64 @@ function normalizeSessionStore(input) {
   }
 
   return store;
+}
+
+function normalizeSettingsStore(input) {
+  const webhook = input?.webhook && typeof input.webhook === "object" ? input.webhook : {};
+
+  return {
+    webhook: {
+      enabled: parseBoolean(webhook.enabled, Boolean(String(webhook.url || "").trim())),
+      url: String(webhook.url || "").trim(),
+      secret: String(webhook.secret || "").trim(),
+      allowPrivate: parseBoolean(webhook.allowPrivate, true),
+      allowGroups: parseBoolean(webhook.allowGroups, true),
+      allowNewsletters: parseBoolean(webhook.allowNewsletters, false),
+      allowBroadcasts: parseBoolean(webhook.allowBroadcasts, false),
+      includeFromMe: parseBoolean(webhook.includeFromMe, false),
+    },
+  };
+}
+
+function mergeSettingsStore(currentSettings, input) {
+  const payload = input && typeof input === "object" ? input : {};
+  const webhookInput = payload.webhook && typeof payload.webhook === "object" ? payload.webhook : {};
+  const settings = normalizeSettingsStore({
+    ...currentSettings,
+    webhook: {
+      ...(currentSettings?.webhook || {}),
+      ...webhookInput,
+    },
+  });
+
+  settings.webhook.url = normalizeWebhookUrl(settings.webhook.url);
+
+  if (settings.webhook.enabled && !settings.webhook.url) {
+    throw new Error("Informe a URL do webhook para ativar a entrega.");
+  }
+
+  return settings;
+}
+
+function normalizeWebhookUrl(value) {
+  const raw = String(value || "").trim();
+
+  if (!raw) {
+    return "";
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("Informe uma URL de webhook valida.");
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("Use uma URL http ou https para o webhook.");
+  }
+
+  return parsed.toString();
 }
 
 function ensureSessionMeta(store, sessionId, patch = {}) {

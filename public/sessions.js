@@ -4,10 +4,11 @@ import {
   getSessionById,
   loadPanelState,
   savePanelState,
-} from "./shared.js?v=20260317-6";
+} from "./shared.js?v=20260317-7";
 
 const state = {
   sessions: [],
+  settings: null,
   selectedSessionId: "",
   refreshTimer: null,
 };
@@ -28,6 +29,16 @@ const qrFrame = document.getElementById("qrFrame");
 const connectButton = document.getElementById("connectButton");
 const logoutButton = document.getElementById("logoutButton");
 const deleteButton = document.getElementById("deleteButton");
+const settingsForm = document.getElementById("settingsForm");
+const webhookEnabledInput = document.getElementById("webhookEnabledInput");
+const webhookUrlInput = document.getElementById("webhookUrlInput");
+const webhookSecretInput = document.getElementById("webhookSecretInput");
+const allowPrivateInput = document.getElementById("allowPrivateInput");
+const allowGroupsInput = document.getElementById("allowGroupsInput");
+const allowNewslettersInput = document.getElementById("allowNewslettersInput");
+const allowBroadcastsInput = document.getElementById("allowBroadcastsInput");
+const includeFromMeInput = document.getElementById("includeFromMeInput");
+const settingsNote = document.getElementById("settingsNote");
 
 loadInitialState();
 bindEvents();
@@ -119,11 +130,20 @@ function bindEvents() {
     sessionNote.textContent = "Sessao excluida.";
     await refreshSessions(true);
   });
+
+  settingsForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await saveSettings();
+  });
+
+  webhookEnabledInput.addEventListener("change", () => {
+    syncSettingsFormState();
+  });
 }
 
 async function bootstrap() {
   startAutoRefresh();
-  await refreshSessions(true);
+  await Promise.all([refreshSessions(true), refreshSettings()]);
 }
 
 function startAutoRefresh() {
@@ -163,6 +183,20 @@ async function refreshSessions(force = false) {
   persistSelection();
   renderSessions();
   renderSelectedSession();
+}
+
+async function refreshSettings() {
+  settingsNote.textContent = "Carregando configuracoes...";
+
+  const response = await apiRequest("/api/settings");
+  if (!response.ok) {
+    settingsNote.textContent = response.error || "Falha ao carregar configuracoes.";
+    return;
+  }
+
+  state.settings = normalizeSettings(response.data.settings);
+  renderSettings();
+  settingsNote.textContent = buildSettingsNote(state.settings);
 }
 
 function renderSessions() {
@@ -282,6 +316,57 @@ function setButtonsDisabled(disabled) {
   deleteButton.disabled = disabled;
 }
 
+function renderSettings() {
+  const settings = normalizeSettings(state.settings);
+  const webhook = settings.webhook;
+
+  webhookEnabledInput.checked = Boolean(webhook.enabled);
+  webhookUrlInput.value = webhook.url || "";
+  webhookSecretInput.value = webhook.secret || "";
+  allowPrivateInput.checked = Boolean(webhook.allowPrivate);
+  allowGroupsInput.checked = Boolean(webhook.allowGroups);
+  allowNewslettersInput.checked = Boolean(webhook.allowNewsletters);
+  allowBroadcastsInput.checked = Boolean(webhook.allowBroadcasts);
+  includeFromMeInput.checked = Boolean(webhook.includeFromMe);
+
+  syncSettingsFormState();
+}
+
+function syncSettingsFormState() {
+  webhookUrlInput.required = webhookEnabledInput.checked;
+}
+
+async function saveSettings() {
+  const payload = {
+    webhook: {
+      enabled: webhookEnabledInput.checked,
+      url: webhookUrlInput.value.trim(),
+      secret: webhookSecretInput.value.trim(),
+      allowPrivate: allowPrivateInput.checked,
+      allowGroups: allowGroupsInput.checked,
+      allowNewsletters: allowNewslettersInput.checked,
+      allowBroadcasts: allowBroadcastsInput.checked,
+      includeFromMe: includeFromMeInput.checked,
+    },
+  };
+
+  settingsNote.textContent = "Salvando configuracoes...";
+
+  const response = await apiRequest("/api/settings", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    settingsNote.textContent = response.error || "Nao foi possivel salvar as configuracoes.";
+    return;
+  }
+
+  state.settings = normalizeSettings(response.data.settings);
+  renderSettings();
+  settingsNote.textContent = "Configuracoes salvas.";
+}
+
 async function runSessionAction(action, successMessage) {
   if (!state.selectedSessionId) {
     return;
@@ -311,4 +396,33 @@ function persistSelection() {
   savePanelState({
     selectedSessionId: state.selectedSessionId,
   });
+}
+
+function normalizeSettings(value) {
+  const webhook = value?.webhook || {};
+
+  return {
+    webhook: {
+      enabled: Boolean(webhook.enabled),
+      url: webhook.url || "",
+      secret: webhook.secret || "",
+      allowPrivate: webhook.allowPrivate !== false,
+      allowGroups: webhook.allowGroups !== false,
+      allowNewsletters: Boolean(webhook.allowNewsletters),
+      allowBroadcasts: Boolean(webhook.allowBroadcasts),
+      includeFromMe: Boolean(webhook.includeFromMe),
+    },
+  };
+}
+
+function buildSettingsNote(settings) {
+  if (!settings?.webhook?.enabled) {
+    return "Webhook desativado. O payload inclui sessao, conversa e mensagem.";
+  }
+
+  if (!settings.webhook.url) {
+    return "Webhook ativo, mas sem URL configurada.";
+  }
+
+  return "Webhook ativo. Novas mensagens serao enviadas para a URL configurada.";
 }

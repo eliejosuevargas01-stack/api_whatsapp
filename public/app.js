@@ -8,7 +8,7 @@ import {
   getSessionById,
   loadPanelState,
   savePanelState,
-} from "./shared.js?v=20260317-6";
+} from "./shared.js?v=20260317-7";
 
 const state = {
   sessions: [],
