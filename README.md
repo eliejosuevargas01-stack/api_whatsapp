@@ -1,32 +1,34 @@
 # API WhatsApp
 
-Aplicacao unica para deploy no Coolify com:
+Aplicacao unica com:
 
 - API Fastify em `/api/*`
-- painel web servido em `/`
-- sessao do WhatsApp persistida em `sessions/`
-- historico e configuracoes persistidos em `data/`
+- painel local simples em `/`
+- multiplas sessoes/dispositivos de WhatsApp
+- QR Code por sessao
+- historico de conversas por sessao
 
 ## Requisitos
 
 - Node.js 20+
-- variaveis de ambiente definidas
-- volume persistente para `sessions/` e `data/` em producao
+- pasta persistente para `sessions/`
+- pasta persistente para `data/`
 
 ## Variaveis de ambiente
 
-Use o `.env.example` como base:
+Use `.env.example` como base:
 
 - `PORT`
 - `HOST`
-- `API_KEY`
-- `WEBHOOK_URL`
-- `WEBHOOK_SECRET`
 - `RATE_LIMIT_MAX`
 - `RATE_LIMIT_WINDOW`
+- `BODY_LIMIT_MB`
 - `AUTO_CONNECT`
+- `SYNC_FULL_HISTORY`
 - `SESSIONS_DIR`
 - `DATA_DIR`
+- `MEDIA_DIR`
+- `MAX_STORED_MESSAGES` (`0` = sem limite)
 - `LOG_LEVEL`
 
 ## Rodando localmente
@@ -39,29 +41,26 @@ npm run dev
 
 Abra `http://localhost:3000`.
 
-## Deploy no Coolify
+## Estrutura de dados
 
-Use `Dockerfile` na raiz do projeto.
-
-No Coolify:
-
-1. Crie uma `Application` apontando para este repositório.
-2. Escolha o build pack `Dockerfile`.
-3. Configure as variaveis do `.env.example`.
-4. Monte volumes persistentes para:
-   - `/app/sessions`
-   - `/app/data`
-5. Defina health check em `/api/health`.
+- `sessions/`: autenticacao do WhatsApp por sessao
+- `data/sessions.json`: metadados das sessoes
+- `data/conversations.json`: resumo das conversas por sessao
+- `data/messages.json`: historico de mensagens por sessao
+- `data/media/`: cache local de imagens, videos, audios, stickers e documentos
 
 ## Endpoints principais
 
 - `GET /api/health`
+- `GET /api/bootstrap`
 - `GET /api/status`
-- `POST /api/whatsapp/connect`
-- `POST /api/whatsapp/disconnect`
-- `POST /api/whatsapp/logout`
-- `GET /api/conversations`
-- `GET /api/conversations/:id`
-- `POST /api/messages/send`
-- `GET /api/webhook`
-- `PUT /api/webhook`
+- `GET /api/sessions`
+- `POST /api/sessions`
+- `GET /api/sessions/:sessionId`
+- `POST /api/sessions/:sessionId/connect`
+- `POST /api/sessions/:sessionId/disconnect`
+- `POST /api/sessions/:sessionId/logout`
+- `GET /api/sessions/:sessionId/conversations`
+- `GET /api/sessions/:sessionId/conversations/:jid/messages`
+- `POST /api/sessions/:sessionId/conversations/:jid/read`
+- `POST /api/sessions/:sessionId/messages/send`

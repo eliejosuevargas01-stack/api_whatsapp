@@ -3,182 +3,98 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>EVA Control Panel</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="/styles.css" />
+    <title>Chat WhatsApp</title>
+    <link rel="stylesheet" href="/styles.css?v=20260317-6" />
   </head>
-  <body>
-    <div class="page">
-      <header class="hero">
+  <body class="chat-page">
+    <div class="shell">
+      <header class="topbar">
         <div>
-          <p class="eyebrow">Painel de Operacoes</p>
-          <h1>EVA WhatsApp</h1>
-          <p class="subtitle">
-            Conecte a sessao, leia o QR Code e configure o webhook do n8n em um so lugar.
-          </p>
+          <p class="eyebrow">Painel local</p>
+          <h1>Conversas</h1>
         </div>
-        <div class="status-card" id="statusCard">
-          <div>
-            <p class="label">Status da sessao</p>
-            <p class="status" id="sessionStatus">Desconectado</p>
-            <p class="status-note" id="sessionNote">O QR aparece aqui quando a sessao iniciar.</p>
-          </div>
-          <div class="pulse" aria-hidden="true"></div>
+
+        <div class="topbar-actions">
+          <label class="session-picker">
+            <span>Sessao</span>
+            <select id="sessionSelect"></select>
+          </label>
+          <span id="sessionStatus" class="status-pill status-idle">inativa</span>
+          <a class="action-link" href="/sessoes">Gerenciar sessoes</a>
         </div>
       </header>
 
-      <nav class="tab-bar">
-        <button class="tab active" data-tab="ops">Operacoes</button>
-        <button class="tab" data-tab="chat">Chat</button>
-      </nav>
-
-      <main class="grid" data-page="ops">
-        <section class="panel qr-panel">
+      <main class="chat-layout">
+        <aside class="sidebar panel">
           <div class="panel-head">
-            <h2>QR Code</h2>
-            <div class="panel-actions">
-              <button class="ghost" id="connectSession">Conectar</button>
-              <button class="ghost" id="refreshStatus">Atualizar</button>
-              <button class="ghost danger" id="disconnectSession">Desconectar</button>
-              <button class="ghost danger" id="logoutSession">Resetar sessao</button>
+            <div>
+              <h2>Lista</h2>
+              <p class="muted">O foco da tela principal fica nas conversas.</p>
             </div>
+            <button id="refreshConversationsButton" class="action-button secondary" type="button">
+              Atualizar
+            </button>
           </div>
-          <div class="qr-wrapper">
-            <div class="qr-frame" id="qrFrame">
-              <span class="qr-placeholder">Aguardando QR Code...</span>
-            </div>
-          </div>
-          <div class="hint">
-            Abra o WhatsApp, toque em Aparelhos conectados e escaneie o QR.
-          </div>
-        </section>
 
-        <section class="panel webhook-panel">
-          <div class="panel-head">
-            <h2>Webhook n8n</h2>
-            <p class="muted">Configure para receber mensagens no fluxo.</p>
-          </div>
-          <form id="webhookForm" class="stack">
-            <label>
-              URL do webhook
-              <input type="url" name="webhookUrl" placeholder="https://n8n.exemplo/webhook/..." />
-            </label>
-            <label>
-              Secret (opcional)
-              <input type="text" name="webhookSecret" placeholder="Seu segredo" />
-            </label>
-            <label>
-              Filtro de mensagens
-              <select name="webhookFilterMode">
-                <option value="all">Tudo (contatos + grupos)</option>
-                <option value="contacts_only">Somente contatos</option>
-                <option value="groups_allowlist">Somente grupos especificos</option>
-              </select>
-            </label>
-            <label class="allowlist hidden" id="allowlistField">
-              JIDs de grupos permitidos (um por linha)
-              <textarea name="webhookGroupAllowlist" rows="4" placeholder="1203630xxxx@g.us"></textarea>
-            </label>
-            <label class="checkbox">
-              <input type="checkbox" name="webhookIgnoreFromMe" />
-              Ignorar mensagens enviadas por mim
-            </label>
-            <button type="submit">Salvar configuracao</button>
-            <p class="small" id="webhookFeedback"></p>
-          </form>
-        </section>
+          <input
+            id="conversationSearchInput"
+            type="search"
+            placeholder="Buscar por nome, numero ou trecho"
+            autocomplete="off"
+          />
 
-        <section class="panel settings-panel">
-          <div class="panel-head">
-            <h2>Configuracoes</h2>
-            <p class="muted">Defina o endpoint da API e a sua API Key.</p>
+          <div id="conversationList" class="conversation-list">
+            <p class="empty">Selecione uma sessao para carregar as conversas.</p>
           </div>
-          <form id="settingsForm" class="stack">
-            <label>
-              Base URL da API
-              <input type="url" name="baseUrl" placeholder="http://localhost:3000" required />
-            </label>
-            <label>
-              API Key
-              <input type="password" name="apiKey" placeholder="SUA_API_KEY" />
-            </label>
-            <div class="two">
-              <label>
-                Auto refresh (seg)
-                <input type="number" name="refreshInterval" min="5" max="120" value="15" />
-              </label>
-              <label>
-                Tema do painel
-                <select name="theme">
-                  <option value="sunset">Sunset</option>
-                  <option value="coast">Coast</option>
-                  <option value="citrus">Citrus</option>
-                </select>
-              </label>
-            </div>
-            <button type="submit">Aplicar</button>
-            <p class="small" id="settingsFeedback"></p>
-          </form>
-        </section>
-
-        <section class="panel stats-panel">
-          <div class="panel-head">
-            <h2>Resumo</h2>
-            <p class="muted">Indicadores rapidos da operacao atual.</p>
-          </div>
-          <div class="stats-grid">
-            <article class="metric-card">
-              <span class="metric-label">Conversas</span>
-              <strong class="metric-value" id="metricConversations">0</strong>
-            </article>
-            <article class="metric-card">
-              <span class="metric-label">Mensagens</span>
-              <strong class="metric-value" id="metricMessages">0</strong>
-            </article>
-            <article class="metric-card">
-              <span class="metric-label">Grupos</span>
-              <strong class="metric-value" id="metricGroups">0</strong>
-            </article>
-            <article class="metric-card">
-              <span class="metric-label">Webhook</span>
-              <strong class="metric-value" id="metricWebhook">Nao</strong>
-            </article>
-          </div>
-        </section>
-      </main>
-
-      <section class="chat-view" data-page="chat">
-        <aside class="chat-sidebar">
-          <div class="sidebar-head">
-            <h2>Conversas</h2>
-            <button class="ghost" id="refreshConversations">Atualizar</button>
-          </div>
-          <div class="conversation-list" id="conversationList"></div>
         </aside>
-        <div class="chat-panel">
+
+        <section class="chat-panel panel">
           <div class="chat-header">
             <div>
-              <p class="label">Contato</p>
-              <h3 id="chatTitle">Selecione uma conversa</h3>
+              <h2 id="conversationTitle">Selecione uma conversa</h2>
+              <p id="conversationMeta" class="muted">Escolha uma conversa na lateral para abrir o historico.</p>
             </div>
-            <span class="muted" id="chatMeta"></span>
+            <p id="chatNotice" class="notice"></p>
           </div>
-          <div class="chat-messages" id="chatMessages">
-            <p class="empty">Sem mensagens para mostrar.</p>
+
+          <div id="messageList" class="message-list">
+            <p class="empty">Nenhuma conversa carregada.</p>
           </div>
-          <form class="chat-input" id="chatForm">
-            <input type="text" name="message" placeholder="Digite sua mensagem..." required />
-            <button type="submit">Enviar</button>
+
+          <form id="composerForm" class="composer">
+            <textarea
+              id="composerInput"
+              rows="3"
+              placeholder="Digite uma mensagem ou use como legenda do arquivo"
+            ></textarea>
+
+            <div class="composer-toolbar">
+              <label class="action-button secondary file-button" for="composerFileInput">
+                Anexar
+              </label>
+              <input id="composerFileInput" type="file" hidden />
+
+              <select id="composerMediaKind">
+                <option value="auto">Arquivo: auto</option>
+                <option value="image">Imagem</option>
+                <option value="video">Video</option>
+                <option value="audio">Audio</option>
+                <option value="document">Documento</option>
+                <option value="sticker">Sticker</option>
+              </select>
+
+              <div id="composerFileChip" class="file-chip" hidden>
+                <span id="composerFileName">Nenhum arquivo</span>
+                <button id="composerClearFileButton" type="button" class="chip-clear">remover</button>
+              </div>
+
+              <button id="sendButton" class="action-button" type="submit">Enviar</button>
+            </div>
           </form>
-        </div>
-      </section>
+        </section>
+      </main>
     </div>
 
-    <script src="/app.js"></script>
+    <script type="module" src="/app.js?v=20260317-6"></script>
   </body>
 </html>

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,8 @@ import QRCode from "qrcode";
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  downloadMediaMessage,
+  extensionForMediaMessage,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   useMultiFileAuthState,
@@ -21,6 +23,7 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const DEFAULT_SESSION_ID = "principal";
 
 const parseBoolean = (value, fallback = false) => {
   if (value === undefined || value === null || value === "") {
@@ -38,68 +41,90 @@ const parseInteger = (value, fallback) => {
 const config = {
   port: parseInteger(process.env.PORT, 3000),
   host: process.env.HOST || "0.0.0.0",
-  apiKey: process.env.API_KEY || "",
-  webhookUrl: process.env.WEBHOOK_URL || "",
-  webhookSecret: process.env.WEBHOOK_SECRET || "",
   rateLimitMax: parseInteger(process.env.RATE_LIMIT_MAX, 120),
   rateLimitWindow: parseInteger(process.env.RATE_LIMIT_WINDOW, 60_000),
+  bodyLimitBytes: Math.max(parseInteger(process.env.BODY_LIMIT_MB, 64), 1) * 1024 * 1024,
   autoConnect: parseBoolean(process.env.AUTO_CONNECT, true),
+  syncFullHistory: parseBoolean(process.env.SYNC_FULL_HISTORY, true),
+  maxStoredMessages:
+    parseInteger(process.env.MAX_STORED_MESSAGES, 0) > 0
+      ? parseInteger(process.env.MAX_STORED_MESSAGES, 0)
+      : Number.POSITIVE_INFINITY,
   sessionsDir: path.resolve(process.env.SESSIONS_DIR || path.join(__dirname, "sessions")),
   dataDir: path.resolve(process.env.DATA_DIR || path.join(__dirname, "data")),
+  mediaDir: path.resolve(process.env.MEDIA_DIR || path.join(__dirname, "data", "media")),
 };
 
 const paths = {
   messages: path.join(config.dataDir, "messages.json"),
   conversations: path.join(config.dataDir, "conversations.json"),
-  webhook: path.join(config.dataDir, "webhook.json"),
-};
-
-const defaultWebhookSettings = {
-  webhookUrl: config.webhookUrl,
-  webhookSecret: config.webhookSecret,
-  webhookFilterMode: "all",
-  webhookGroupAllowlist: [],
-  webhookIgnoreFromMe: true,
+  sessions: path.join(config.dataDir, "sessions.json"),
 };
 
 const app = Fastify({
   logger: {
     level: process.env.LOG_LEVEL || "info",
   },
+  bodyLimit: config.bodyLimitBytes,
 });
 
-await ensureDirectories();
+await ensureDirectories([config.dataDir, config.sessionsDir, config.mediaDir]);
+const migratedLegacySessionId = await migrateLegacyAuthFiles(config.sessionsDir, DEFAULT_SESSION_ID);
 
 const stores = {
-  messages: normalizeMessagesStore(await readJson(paths.messages, { messages: [] })),
-  conversations: normalizeConversationsStore(
-    await readJson(paths.conversations, {
-      jidToConversationId: {},
-      conversations: {},
-    }),
+  messages: normalizeMessagesStore(
+    await readJson(paths.messages, { messages: [] }),
+    migratedLegacySessionId || DEFAULT_SESSION_ID,
   ),
-  webhook: normalizeWebhookSettings(await readJson(paths.webhook, defaultWebhookSettings)),
+  conversations: normalizeConversationsStore(
+    await readJson(paths.conversations, { sessions: {} }),
+    migratedLegacySessionId || DEFAULT_SESSION_ID,
+  ),
+  sessions: normalizeSessionStore(await readJson(paths.sessions, { sessions: {} })),
 };
+
+const knownSessionIds = new Set([
+  ...Object.keys(stores.sessions.sessions),
+  ...listSessionIdsFromMessages(stores.messages),
+  ...listSessionIdsFromConversationStore(stores.conversations),
+  ...(await listSessionDirectories(config.sessionsDir)),
+]);
+
+if (migratedLegacySessionId) {
+  knownSessionIds.add(migratedLegacySessionId);
+}
+
+for (const sessionId of knownSessionIds) {
+  ensureSessionMeta(stores.sessions, sessionId, {
+    name: sessionId === DEFAULT_SESSION_ID ? "Sessao principal" : formatSessionName(sessionId),
+  });
+  ensureConversationBucket(stores.conversations, sessionId);
+}
+
+rebuildConversationsFromMessages(stores);
 
 const writeMessages = createJsonWriter(paths.messages, app.log);
 const writeConversations = createJsonWriter(paths.conversations, app.log);
-const writeWebhook = createJsonWriter(paths.webhook, app.log);
+const writeSessions = createJsonWriter(paths.sessions, app.log);
+
+const persistMessages = () => writeMessages(stores.messages);
+const persistConversations = () => writeConversations(stores.conversations);
+const persistSessions = () => writeSessions(stores.sessions);
+
+await Promise.all([persistMessages(), persistConversations(), persistSessions()]);
+
 const messageIndex = new Set(
   stores.messages.messages.map((message) => getMessageSignature(message)),
 );
 
-const persistMessages = () => writeMessages(stores.messages);
-const persistConversations = () => writeConversations(stores.conversations);
-const persistWebhook = () => writeWebhook(stores.webhook);
-
-const whatsapp = createWhatsAppService({
+const sessionManager = createSessionManager({
   app,
   config,
   stores,
   messageIndex,
   persistMessages,
   persistConversations,
-  persistWebhook,
+  persistSessions,
 });
 
 app.register(rateLimit, {
@@ -110,118 +135,161 @@ app.register(rateLimit, {
 app.register(fastifyStatic, {
   root: path.join(__dirname, "public"),
   prefix: "/",
-  decorateReply: false,
 });
 
-app.addHook("onRequest", async (request, reply) => {
-  const pathname = getPathname(request.raw.url);
+app.get("/", async (request, reply) =>
+  reply.header("Cache-Control", "no-store").sendFile("index.html"),
+);
 
-  if (!pathname.startsWith("/api/")) {
-    return;
-  }
-
-  if (pathname === "/api/health" || pathname === "/api/bootstrap") {
-    return;
-  }
-
-  if (!config.apiKey) {
-    return;
-  }
-
-  const authHeader = String(request.headers.authorization || "");
-  const bearerToken = authHeader.toLowerCase().startsWith("bearer ")
-    ? authHeader.slice(7).trim()
-    : "";
-  const providedApiKey =
-    request.headers["x-api-key"] ||
-    bearerToken ||
-    request.query?.apiKey;
-
-  if (providedApiKey !== config.apiKey) {
-    return reply.code(401).send({
-      error: "unauthorized",
-      message: "API key invalida ou ausente.",
-    });
-  }
-});
+app.get("/sessoes", async (request, reply) =>
+  reply.header("Cache-Control", "no-store").sendFile("sessions.html"),
+);
 
 app.get("/api/health", async () => ({
   ok: true,
   uptimeSeconds: Math.floor(process.uptime()),
   timestamp: new Date().toISOString(),
-  whatsapp: {
-    status: whatsapp.getSnapshot().status,
-  },
+  sessionCount: Object.keys(stores.sessions.sessions).length,
 }));
 
 app.get("/api/bootstrap", async () => ({
-  appName: "API WhatsApp Coolify",
-  authRequired: Boolean(config.apiKey),
+  appName: "API WhatsApp",
 }));
 
 app.get("/api/status", async () => ({
-  authRequired: Boolean(config.apiKey),
-  whatsapp: whatsapp.getSnapshot(),
-  stats: getDashboardStats(stores),
-  webhook: stores.webhook,
+  sessionCount: Object.keys(stores.sessions.sessions).length,
+  totals: getGlobalStats(stores),
+  sessions: sessionManager.listSessions(),
 }));
 
-app.post("/api/whatsapp/connect", async () => {
-  await whatsapp.connect();
+app.get("/api/sessions", async () => ({
+  sessions: sessionManager.listSessions(),
+}));
+
+app.post("/api/sessions", async (request, reply) => {
+  const name = String(request.body?.name || "").trim();
+
+  if (!name) {
+    return reply.code(400).send({
+      error: "bad_request",
+      message: "Informe um nome para a sessao.",
+    });
+  }
+
+  const session = await sessionManager.createSession(name);
   return {
     ok: true,
-    whatsapp: whatsapp.getSnapshot(),
+    session,
   };
 });
 
-app.post("/api/whatsapp/disconnect", async () => {
-  await whatsapp.disconnect();
+app.get("/api/sessions/:sessionId", async (request, reply) => {
+  const session = sessionManager.getSessionSummary(request.params.sessionId);
+
+  if (!session) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
   return {
-    ok: true,
-    whatsapp: whatsapp.getSnapshot(),
+    session,
   };
 });
 
-app.post("/api/whatsapp/logout", async () => {
-  await whatsapp.logout();
+app.post("/api/sessions/:sessionId/connect", async (request, reply) => {
+  if (!sessionManager.hasSession(request.params.sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
+  const snapshot = await sessionManager.connect(request.params.sessionId);
   return {
     ok: true,
-    whatsapp: whatsapp.getSnapshot(),
+    snapshot,
+    session: sessionManager.getSessionSummary(request.params.sessionId),
   };
 });
 
-app.get("/api/conversations", async (request) => {
+app.post("/api/sessions/:sessionId/disconnect", async (request, reply) => {
+  if (!sessionManager.hasSession(request.params.sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
+  const snapshot = await sessionManager.disconnect(request.params.sessionId);
+  return {
+    ok: true,
+    snapshot,
+    session: sessionManager.getSessionSummary(request.params.sessionId),
+  };
+});
+
+app.delete("/api/sessions/:sessionId", async (request, reply) => {
+  if (!sessionManager.hasSession(request.params.sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
+  const removedSessionId = await sessionManager.removeSession(request.params.sessionId);
+  return {
+    ok: true,
+    removedSessionId,
+  };
+});
+
+app.post("/api/sessions/:sessionId/logout", async (request, reply) => {
+  if (!sessionManager.hasSession(request.params.sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
+  const snapshot = await sessionManager.logout(request.params.sessionId);
+  return {
+    ok: true,
+    snapshot,
+    session: sessionManager.getSessionSummary(request.params.sessionId),
+  };
+});
+
+app.get("/api/sessions/:sessionId/conversations", async (request, reply) => {
+  const { sessionId } = request.params;
+
+  if (!sessionManager.hasSession(sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
   const limit = Math.min(parseInteger(request.query?.limit, 100), 500);
   const search = String(request.query?.search || "").trim().toLowerCase();
 
-  const conversations = Object.entries(stores.conversations.conversations)
-    .map(([id, conversation]) => buildConversationSummary(id, conversation, stores))
-    .filter((conversation) => {
-      if (!search) {
-        return true;
-      }
-
-      return [
-        conversation.title,
-        conversation.lastJid,
-        conversation.lastMessagePreview,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase()
-        .includes(search);
-    })
-    .sort((left, right) => right.updatedAt - left.updatedAt)
-    .slice(0, limit);
-
   return {
-    conversations,
+    conversations: listSessionConversations(sessionId, stores, { limit, search }),
   };
 });
 
-app.get("/api/conversations/:id", async (request, reply) => {
-  const conversation = stores.conversations.conversations[request.params.id];
+app.get("/api/sessions/:sessionId/conversations/:jid/messages", async (request, reply) => {
+  const { sessionId, jid } = request.params;
 
+  if (!sessionManager.hasSession(sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
+  const conversation = getConversationMeta(stores, sessionId, jid);
   if (!conversation) {
     return reply.code(404).send({
       error: "not_found",
@@ -229,15 +297,36 @@ app.get("/api/conversations/:id", async (request, reply) => {
     });
   }
 
+  const limit = Math.min(parseInteger(request.query?.limit, 120), config.maxStoredMessages);
+  const beforeId = String(request.query?.beforeId || "").trim();
+  const page = getConversationMessagesPage(sessionId, jid, stores, {
+    limit,
+    beforeId,
+  });
+
   return {
-    conversation: buildConversationSummary(request.params.id, conversation, stores),
-    messages: getConversationMessages(request.params.id, stores).slice(-200),
+    conversation: buildConversationSummary(conversation),
+    messages: page.messages.map((message) => serializeMessageForClient(sessionId, message)),
+    page: {
+      limit,
+      hasOlder: page.hasOlder,
+      oldestMessageId: page.oldestMessageId,
+      newestMessageId: page.newestMessageId,
+    },
   };
 });
 
-app.get("/api/conversations/:id/messages", async (request, reply) => {
-  const conversation = stores.conversations.conversations[request.params.id];
+app.post("/api/sessions/:sessionId/conversations/:jid/history", async (request, reply) => {
+  const { sessionId, jid } = request.params;
 
+  if (!sessionManager.hasSession(sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
+  const conversation = getConversationMeta(stores, sessionId, jid);
   if (!conversation) {
     return reply.code(404).send({
       error: "not_found",
@@ -245,15 +334,36 @@ app.get("/api/conversations/:id/messages", async (request, reply) => {
     });
   }
 
-  const limit = Math.min(parseInteger(request.query?.limit, 200), 500);
-  return {
-    messages: getConversationMessages(request.params.id, stores).slice(-limit),
-  };
+  try {
+    const count = Math.min(parseInteger(request.body?.count, 80), 200);
+    const result = await sessionManager.loadOlderMessages(sessionId, jid, count);
+
+    return {
+      ok: true,
+      importedCount: result.importedCount,
+      requestId: result.requestId,
+      requiresBootstrap: Boolean(result.requiresBootstrap),
+      conversation: buildConversationSummary(getConversationMeta(stores, sessionId, jid)),
+    };
+  } catch (error) {
+    return reply.code(400).send({
+      error: "bad_request",
+      message: errorToMessage(error) || "Nao foi possivel carregar mensagens antigas.",
+    });
+  }
 });
 
-app.post("/api/conversations/:id/read", async (request, reply) => {
-  const conversation = stores.conversations.conversations[request.params.id];
+app.post("/api/sessions/:sessionId/conversations/:jid/read", async (request, reply) => {
+  const { sessionId, jid } = request.params;
 
+  if (!sessionManager.hasSession(sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
+  const conversation = getConversationMeta(stores, sessionId, jid);
   if (!conversation) {
     return reply.code(404).send({
       error: "not_found",
@@ -266,75 +376,97 @@ app.post("/api/conversations/:id/read", async (request, reply) => {
 
   return {
     ok: true,
-    conversation: buildConversationSummary(request.params.id, conversation, stores),
+    conversation: buildConversationSummary(conversation),
   };
 });
 
-app.post("/api/messages/send", async (request, reply) => {
+app.post("/api/sessions/:sessionId/messages/send", async (request, reply) => {
+  const { sessionId } = request.params;
   const jid = String(request.body?.jid || "").trim();
   const text = String(request.body?.text || "").trim();
+  const mediaInput = request.body?.media || null;
 
-  if (!jid || !text) {
-    return reply.code(400).send({
-      error: "bad_request",
-      message: "Informe jid e text.",
+  if (!sessionManager.hasSession(sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
     });
   }
 
-  const message = await whatsapp.sendText(jid, text);
-
-  return {
-    ok: true,
-    message,
-  };
-});
-
-app.get("/api/webhook", async () => ({
-  webhook: stores.webhook,
-}));
-
-app.put("/api/webhook", async (request) => {
-  stores.webhook = normalizeWebhookSettings({
-    ...stores.webhook,
-    ...request.body,
-  });
-
-  await persistWebhook();
-
-  return {
-    ok: true,
-    webhook: stores.webhook,
-  };
-});
-
-app.post("/api/webhook/test", async (request, reply) => {
-  if (!stores.webhook.webhookUrl) {
+  if (!jid || (!text && !mediaInput)) {
     return reply.code(400).send({
       error: "bad_request",
-      message: "Defina WEBHOOK_URL antes de testar.",
+      message: "Informe jid e uma mensagem ou arquivo.",
     });
   }
 
-  const payload = {
-    event: "webhook.test",
-    timestamp: new Date().toISOString(),
-    whatsapp: whatsapp.getSnapshot(),
-    message: {
-      id: `test_${Date.now()}`,
-      jid: "5511999999999@s.whatsapp.net",
-      fromMe: false,
-      text: "Mensagem de teste enviada pela API.",
-      timestamp: Math.floor(Date.now() / 1000),
-      type: "text",
-    },
-  };
+  let message;
 
-  const result = await postWebhook(stores.webhook, payload);
+  try {
+    if (mediaInput) {
+      const media = normalizeOutboundMediaInput(mediaInput);
+      message = await sessionManager.sendMedia(sessionId, jid, {
+        text,
+        media,
+      });
+    } else {
+      message = await sessionManager.sendText(sessionId, jid, text);
+    }
+  } catch (error) {
+    return reply.code(400).send({
+      error: "bad_request",
+      message: errorToMessage(error) || "Nao foi possivel enviar a mensagem.",
+    });
+  }
 
   return {
     ok: true,
-    result,
+    message: serializeMessageForClient(sessionId, message),
   };
+});
+
+app.get("/api/sessions/:sessionId/media", async (request, reply) => {
+  const { sessionId } = request.params;
+  const messageId = String(request.query?.messageId || "").trim();
+
+  if (!sessionManager.hasSession(sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
+  if (!messageId) {
+    return reply.code(400).send({
+      error: "bad_request",
+      message: "Informe messageId.",
+    });
+  }
+
+  const message = findStoredMessage(sessionId, messageId, stores);
+  if (!message) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Mensagem nao encontrada.",
+    });
+  }
+
+  if (!message.media) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "A mensagem nao possui midia.",
+    });
+  }
+
+  try {
+    const resolved = await sessionManager.resolveMessageMedia(sessionId, message);
+    return sendMediaFileResponse(reply, resolved.filePath, resolved.mimeType);
+  } catch (error) {
+    return reply.code(400).send({
+      error: "bad_request",
+      message: errorToMessage(error) || "Nao foi possivel carregar a midia.",
+    });
+  }
 });
 
 app.setNotFoundHandler(async (request, reply) => {
@@ -350,7 +482,7 @@ app.setNotFoundHandler(async (request, reply) => {
     });
   }
 
-  return reply.sendFile("index.html");
+  return reply.header("Cache-Control", "no-store").sendFile("index.html");
 });
 
 try {
@@ -362,9 +494,7 @@ try {
   app.log.info(`Servidor disponivel em http://${config.host}:${config.port}`);
 
   if (config.autoConnect) {
-    void whatsapp.connect().catch((error) => {
-      app.log.error({ error }, "Falha no auto connect do WhatsApp.");
-    });
+    void sessionManager.autoConnectExistingSessions();
   }
 } catch (error) {
   app.log.error({ error }, "Falha ao iniciar o servidor.");
@@ -373,7 +503,7 @@ try {
 
 const shutdown = async (signal) => {
   app.log.info({ signal }, "Encerrando aplicacao.");
-  await whatsapp.disconnect();
+  await sessionManager.disconnectAll();
   await app.close();
   process.exit(0);
 };
@@ -386,374 +516,991 @@ process.on("SIGTERM", () => {
   void shutdown("SIGTERM");
 });
 
-function createWhatsAppService({
+function createSessionManager({
   app,
   config,
   stores,
   messageIndex,
   persistMessages,
   persistConversations,
+  persistSessions,
 }) {
+  const services = new Map();
   const logger = Pino({ level: "silent" });
-  const state = {
-    socket: null,
-    connectPromise: null,
-    reconnectTimer: null,
-    reconnectAttempts: 0,
-    manualDisconnect: false,
-    qrCode: null,
-    qrDataUrl: null,
-    status: "idle",
-    me: null,
-    connectedAt: null,
-    lastDisconnectAt: null,
-    lastError: null,
-  };
 
-  const clearReconnectTimer = () => {
-    if (state.reconnectTimer) {
-      clearTimeout(state.reconnectTimer);
-      state.reconnectTimer = null;
-    }
-  };
-
-  const scheduleReconnect = () => {
-    if (state.manualDisconnect || state.reconnectTimer) {
+  const trimMessagesStore = () => {
+    if (stores.messages.messages.length <= config.maxStoredMessages) {
       return;
     }
 
-    const delayMs = Math.min(5_000 * (state.reconnectAttempts + 1), 30_000);
-    state.reconnectAttempts += 1;
+    const removed = stores.messages.messages.splice(
+      0,
+      stores.messages.messages.length - config.maxStoredMessages,
+    );
 
-    state.reconnectTimer = setTimeout(() => {
-      state.reconnectTimer = null;
-      void connect().catch((error) => {
-        app.log.error({ error }, "Falha ao reconectar o WhatsApp.");
-      });
-    }, delayMs);
+    removed.forEach((message) => {
+      messageIndex.delete(getMessageSignature(message));
+    });
   };
 
-  const getSnapshot = () => ({
-    status: state.status,
-    qrAvailable: Boolean(state.qrDataUrl),
-    qrDataUrl: state.qrDataUrl,
-    me: state.me,
-    connectedAt: state.connectedAt,
-    lastDisconnectAt: state.lastDisconnectAt,
-    lastError: state.lastError,
-    reconnectAttempts: state.reconnectAttempts,
-  });
+  const recordMessage = (sessionId, record, options = {}) => {
+    const normalizedRecord = {
+      ...record,
+      sessionId,
+      jid: record.jid || "",
+    };
+    const signature = getMessageSignature(normalizedRecord);
 
-  const updateConversationFromRecord = (record) => {
-    const conversationId = ensureConversation(record.jid, stores, record);
-    const conversation = stores.conversations.conversations[conversationId];
-
-    conversation.lastJid = record.jid;
-    conversation.kind = getConversationKind(record.jid);
-    conversation.updatedAt = record.timestamp * 1000;
-    conversation.title =
-      conversation.title || record.pushName || formatJidForDisplay(record.jid);
-    conversation.preview = getMessagePreview(record);
-    conversation.unreadCount = record.fromMe ? 0 : (conversation.unreadCount || 0) + 1;
-
-    if (!conversation.jids.includes(record.jid)) {
-      conversation.jids.push(record.jid);
-    }
-
-    record.conversationId = conversationId;
-    return conversationId;
-  };
-
-  const recordMessage = (record) => {
-    const signature = getMessageSignature(record);
     if (messageIndex.has(signature)) {
-      return record;
+      return normalizedRecord;
     }
 
-    updateConversationFromRecord(record);
     messageIndex.add(signature);
-    stores.messages.messages.push(record);
+    stores.messages.messages.push(normalizedRecord);
+    trimMessagesStore();
+    upsertConversationFromMessage(stores, sessionId, normalizedRecord, {
+      incrementUnread: options.incrementUnread ?? !normalizedRecord.fromMe,
+      incrementCount: true,
+    });
 
-    if (stores.messages.messages.length > 5_000) {
-      const removed = stores.messages.messages.splice(
-        0,
-        stores.messages.messages.length - 5_000,
-      );
+    const session = ensureSessionMeta(stores.sessions, sessionId);
+    session.updatedAt = Math.max(
+      Number(session.updatedAt || 0),
+      getMessageTimestampMs(normalizedRecord),
+    );
 
-      removed.forEach((message) => {
-        messageIndex.delete(getMessageSignature(message));
-      });
+    if (!options.skipPersist) {
+      void persistMessages();
+      void persistConversations();
+      void persistSessions();
     }
 
-    void persistMessages();
-    void persistConversations();
-
-    if (shouldForwardToWebhook(record, stores.webhook)) {
-      const payload = {
-        event: "message.received",
-        timestamp: new Date().toISOString(),
-        message: record,
-        conversation: buildConversationSummary(record.conversationId, stores.conversations.conversations[record.conversationId], stores),
-      };
-
-      void postWebhook(stores.webhook, payload).catch((error) => {
-        app.log.warn({ error }, "Falha ao enviar webhook de mensagem.");
-      });
-    }
-
-    return record;
+    return normalizedRecord;
   };
 
-  const handleConnectionUpdate = async (update) => {
-    if (update.qr) {
-      state.status = "qr";
-      state.qrCode = update.qr;
-      state.qrDataUrl = await QRCode.toDataURL(update.qr, {
-        margin: 1,
-        width: 320,
-      });
-    }
+  const importHistorySync = async (sessionId, event) => {
+    let changed = false;
+    let importedCount = 0;
 
-    if (update.connection === "open") {
-      clearReconnectTimer();
-      state.reconnectAttempts = 0;
-      state.status = "connected";
-      state.qrCode = null;
-      state.qrDataUrl = null;
-      state.connectedAt = Date.now();
-      state.lastError = null;
-      state.me = state.socket?.user || null;
-      app.log.info("WhatsApp conectado.");
-      return;
-    }
-
-    if (update.connection === "close") {
-      const statusCode = update.lastDisconnect?.error?.output?.statusCode;
-      const loggedOut = statusCode === DisconnectReason.loggedOut;
-
-      state.socket = null;
-      state.me = null;
-      state.connectedAt = null;
-      state.lastDisconnectAt = Date.now();
-      state.lastError = errorToMessage(update.lastDisconnect?.error);
-      state.status = loggedOut ? "logged_out" : "disconnected";
-      state.qrCode = null;
-      state.qrDataUrl = null;
-
-      if (!loggedOut) {
-        scheduleReconnect();
-      }
-    }
-  };
-
-  const handleMessagesUpsert = async (event) => {
-    for (const message of event.messages || []) {
-      const normalized = normalizeIncomingMessage(message);
-      if (!normalized) {
+    for (const chat of event.chats || []) {
+      if (!chat?.id) {
         continue;
       }
 
-      recordMessage(normalized);
+      const conversation = ensureConversationMeta(stores, sessionId, chat.id);
+      const chatName = typeof chat.name === "string" ? chat.name.trim() : "";
+      if (chatName && conversation.title !== chatName) {
+        conversation.title = chatName;
+        changed = true;
+      }
+
+      const unreadCount = Number(chat.unreadCount);
+      if (Number.isFinite(unreadCount) && unreadCount >= 0 && conversation.unreadCount !== unreadCount) {
+        conversation.unreadCount = unreadCount;
+        changed = true;
+      }
+
+      const conversationTimestamp = toStoreTimestampMs(chat.conversationTimestamp);
+      if (conversationTimestamp && conversationTimestamp > Number(conversation.updatedAt || 0)) {
+        conversation.updatedAt = conversationTimestamp;
+        conversation.lastMessageAt = Math.max(
+          Number(conversation.lastMessageAt || 0),
+          conversationTimestamp,
+        );
+        changed = true;
+      }
+
+      for (const chatMessage of extractHistoryChatMessages(chat)) {
+        const normalizedMessage = normalizeIncomingMessage(chatMessage);
+        if (!normalizedMessage) {
+          continue;
+        }
+
+        const previousIndexSize = messageIndex.size;
+        recordMessage(sessionId, normalizedMessage, {
+          skipPersist: true,
+          incrementUnread: false,
+        });
+
+        if (messageIndex.size !== previousIndexSize) {
+          importedCount += 1;
+          changed = true;
+        }
+      }
     }
+
+    for (const historyMessage of event.messages || []) {
+      const normalizedMessage = normalizeIncomingMessage(historyMessage);
+      if (!normalizedMessage) {
+        continue;
+      }
+
+      const previousIndexSize = messageIndex.size;
+      recordMessage(sessionId, normalizedMessage, {
+        skipPersist: true,
+        incrementUnread: false,
+      });
+
+      if (messageIndex.size !== previousIndexSize) {
+        importedCount += 1;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      const session = ensureSessionMeta(stores.sessions, sessionId);
+      session.updatedAt = Date.now();
+      await Promise.all([persistMessages(), persistConversations(), persistSessions()]);
+    }
+
+    app.log.info(
+      {
+        sessionId,
+        importedCount,
+        chatCount: event.chats?.length || 0,
+        syncType: event.syncType ?? null,
+        isLatest: event.isLatest ?? null,
+      },
+      "Historico sincronizado.",
+    );
+
+    return {
+      importedCount,
+      chatCount: event.chats?.length || 0,
+      syncType: event.syncType ?? null,
+      requestId: event.peerDataRequestSessionId || null,
+    };
   };
 
-  const connect = async () => {
-    if (state.connectPromise) {
+  const createService = (sessionId) => {
+    const sessionMeta = ensureSessionMeta(stores.sessions, sessionId);
+    const sessionDir = path.join(config.sessionsDir, sessionId);
+    const state = {
+      socket: null,
+      connectPromise: null,
+      reconnectTimer: null,
+      reconnectAttempts: 0,
+      pendingHistoryRequests: new Map(),
+      manualDisconnect: false,
+      removed: false,
+      status: "idle",
+      qrDataUrl: null,
+      connectedAt: null,
+      lastDisconnectAt: null,
+      lastError: null,
+      me: null,
+    };
+
+    const getSnapshot = () => ({
+      sessionId,
+      status: state.status,
+      qrAvailable: Boolean(state.qrDataUrl),
+      qrDataUrl: state.qrDataUrl,
+      connectedAt: state.connectedAt,
+      lastDisconnectAt: state.lastDisconnectAt,
+      lastError: state.lastError,
+      reconnectAttempts: state.reconnectAttempts,
+      me: serializeMe(state.me),
+      accountId: getAccountId(state.me),
+    });
+
+    const clearReconnectTimer = () => {
+      if (state.reconnectTimer) {
+        clearTimeout(state.reconnectTimer);
+        state.reconnectTimer = null;
+      }
+    };
+
+    const rejectPendingHistoryRequests = (reason) => {
+      for (const [requestId, pending] of state.pendingHistoryRequests.entries()) {
+        pending.reject(new Error(reason || "Solicitacao de historico cancelada."));
+        state.pendingHistoryRequests.delete(requestId);
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (state.manualDisconnect || state.reconnectTimer) {
+        return;
+      }
+
+      const delayMs = Math.min(5_000 * (state.reconnectAttempts + 1), 30_000);
+      state.reconnectAttempts += 1;
+
+      state.reconnectTimer = setTimeout(() => {
+        state.reconnectTimer = null;
+        void connect().catch((error) => {
+          app.log.error({ error, sessionId }, "Falha ao reconectar sessao.");
+        });
+      }, delayMs);
+    };
+
+    const handleConnectionUpdate = async (update) => {
+      if (state.removed) {
+        return;
+      }
+
+      if (update.qr) {
+        state.status = "qr";
+        state.qrDataUrl = await QRCode.toDataURL(update.qr, {
+          margin: 1,
+          width: 320,
+        });
+      }
+
+      if (update.connection === "open") {
+        clearReconnectTimer();
+        state.reconnectAttempts = 0;
+        state.status = "connected";
+        state.qrDataUrl = null;
+        state.connectedAt = Date.now();
+        state.lastError = null;
+        state.me = state.socket?.user || null;
+        sessionMeta.updatedAt = Date.now();
+        void persistSessions();
+        app.log.info({ sessionId }, "WhatsApp conectado.");
+        return;
+      }
+
+      if (update.connection === "close") {
+        const statusCode = update.lastDisconnect?.error?.output?.statusCode;
+        const loggedOut = statusCode === DisconnectReason.loggedOut;
+
+        state.socket = null;
+        state.me = null;
+        state.connectedAt = null;
+        state.lastDisconnectAt = Date.now();
+        state.lastError = errorToMessage(update.lastDisconnect?.error);
+        state.status = loggedOut ? "logged_out" : "disconnected";
+        state.qrDataUrl = null;
+
+        if (!loggedOut) {
+          scheduleReconnect();
+        }
+      }
+    };
+
+    const handleMessagesUpsert = async (event) => {
+      if (state.removed) {
+        return;
+      }
+
+      for (const message of event.messages || []) {
+        const normalizedMessage = normalizeIncomingMessage(message);
+        if (!normalizedMessage) {
+          continue;
+        }
+
+        recordMessage(sessionId, normalizedMessage);
+      }
+    };
+
+    const handleHistorySync = async (event) => {
+      if (state.removed) {
+        return;
+      }
+
+      const result = await importHistorySync(sessionId, event);
+      const requestId = result.requestId;
+
+      if (requestId && state.pendingHistoryRequests.has(requestId)) {
+        const pending = state.pendingHistoryRequests.get(requestId);
+        state.pendingHistoryRequests.delete(requestId);
+        pending.resolve(result);
+      }
+    };
+
+    const connect = async () => {
+      if (state.removed) {
+        throw new Error("Sessao foi removida.");
+      }
+
+      if (state.connectPromise) {
+        return state.connectPromise;
+      }
+
+      if (state.socket && state.status === "connected") {
+        return getSnapshot();
+      }
+
+      clearReconnectTimer();
+      state.manualDisconnect = false;
+      state.status = "connecting";
+      state.lastError = null;
+
+      state.connectPromise = (async () => {
+        await fs.mkdir(sessionDir, { recursive: true });
+        const { state: authState, saveCreds } = await useMultiFileAuthState(sessionDir);
+        const { version } = await fetchLatestBaileysVersion();
+
+        const socket = makeWASocket({
+          version,
+          auth: {
+            creds: authState.creds,
+            keys: makeCacheableSignalKeyStore(authState.keys, logger),
+          },
+          browser: Browsers.macOS("Desktop"),
+          syncFullHistory: config.syncFullHistory,
+          shouldSyncHistoryMessage: () => true,
+          printQRInTerminal: false,
+          markOnlineOnConnect: false,
+          generateHighQualityLinkPreview: false,
+          logger,
+        });
+
+        state.socket = socket;
+        state.me = socket.user || null;
+
+        socket.ev.on("creds.update", saveCreds);
+        socket.ev.on("connection.update", (update) => {
+          void handleConnectionUpdate(update);
+        });
+        socket.ev.on("messaging-history.set", (event) => {
+          void handleHistorySync(event);
+        });
+        socket.ev.on("messages.upsert", (event) => {
+          void handleMessagesUpsert(event);
+        });
+
+        return getSnapshot();
+      })().finally(() => {
+        state.connectPromise = null;
+      });
+
       return state.connectPromise;
-    }
+    };
 
-    if (state.socket && state.status === "connected") {
-      return getSnapshot();
-    }
+    const disconnect = async () => {
+      state.manualDisconnect = true;
+      clearReconnectTimer();
+      rejectPendingHistoryRequests("Sessao desconectada.");
 
-    clearReconnectTimer();
-    state.manualDisconnect = false;
-    state.status = "connecting";
-    state.lastError = null;
+      if (state.socket?.ws?.close) {
+        try {
+          state.socket.ws.close();
+        } catch (error) {
+          app.log.warn({ error, sessionId }, "Falha ao fechar websocket da sessao.");
+        }
+      }
 
-    state.connectPromise = (async () => {
-      const { state: authState, saveCreds } = await useMultiFileAuthState(config.sessionsDir);
-      const { version } = await fetchLatestBaileysVersion();
-
-      const socket = makeWASocket({
-        version,
-        auth: {
-          creds: authState.creds,
-          keys: makeCacheableSignalKeyStore(authState.keys, logger),
-        },
-        browser: Browsers.ubuntu("Coolify Chrome"),
-        printQRInTerminal: false,
-        syncFullHistory: false,
-        markOnlineOnConnect: false,
-        generateHighQualityLinkPreview: false,
-        logger,
-      });
-
-      state.socket = socket;
-      state.me = socket.user || null;
-
-      socket.ev.on("creds.update", saveCreds);
-      socket.ev.on("connection.update", (update) => {
-        void handleConnectionUpdate(update);
-      });
-      socket.ev.on("messages.upsert", (event) => {
-        void handleMessagesUpsert(event);
-      });
+      state.socket = null;
+      state.me = null;
+      state.status = "disconnected";
+      state.qrDataUrl = null;
+      state.connectedAt = null;
+      state.lastDisconnectAt = Date.now();
 
       return getSnapshot();
-    })().finally(() => {
-      state.connectPromise = null;
-    });
+    };
 
-    return state.connectPromise;
+    const logout = async () => {
+      state.manualDisconnect = true;
+      clearReconnectTimer();
+      rejectPendingHistoryRequests("Sessao resetada.");
+
+      if (state.socket) {
+        try {
+          await state.socket.logout();
+        } catch (error) {
+          app.log.warn({ error, sessionId }, "Falha ao fazer logout da sessao.");
+        }
+      }
+
+      await fs.rm(sessionDir, { recursive: true, force: true });
+      await fs.mkdir(sessionDir, { recursive: true });
+
+      state.socket = null;
+      state.me = null;
+      state.status = "logged_out";
+      state.qrDataUrl = null;
+      state.connectedAt = null;
+      state.lastDisconnectAt = Date.now();
+      state.lastError = null;
+
+      return getSnapshot();
+    };
+
+    const destroy = async () => {
+      state.removed = true;
+      state.manualDisconnect = true;
+      clearReconnectTimer();
+      rejectPendingHistoryRequests("Sessao removida.");
+
+      if (state.socket) {
+        try {
+          await state.socket.logout();
+        } catch (error) {
+          app.log.warn({ error, sessionId }, "Falha ao fazer logout da sessao removida.");
+        }
+      }
+
+      if (state.socket?.ws?.close) {
+        try {
+          state.socket.ws.close();
+        } catch (error) {
+          app.log.warn({ error, sessionId }, "Falha ao fechar websocket da sessao removida.");
+        }
+      }
+
+      state.socket = null;
+      state.me = null;
+      state.status = "disconnected";
+      state.qrDataUrl = null;
+      state.connectedAt = null;
+      state.lastDisconnectAt = Date.now();
+      state.lastError = null;
+
+      await fs.rm(sessionDir, { recursive: true, force: true });
+    };
+
+    const sendText = async (jidInput, text) => {
+      if (!state.socket || state.status !== "connected") {
+        throw new Error("Sessao nao esta conectada.");
+      }
+
+      const jid = normalizeJidInput(jidInput);
+      const response = await state.socket.sendMessage(jid, { text });
+
+      return recordMessage(sessionId, {
+        id: response?.key?.id || `local_${Date.now()}`,
+        jid,
+        fromMe: true,
+        text,
+        timestamp: Math.floor(Date.now() / 1000),
+        type: "text",
+        status: "sent",
+        pushName: state.me?.name || state.me?.verifiedName || null,
+        participant: null,
+        media: null,
+      });
+    };
+
+    const sendMedia = async (jidInput, payload) => {
+      if (!state.socket || state.status !== "connected") {
+        throw new Error("Sessao nao esta conectada.");
+      }
+
+      const jid = normalizeJidInput(jidInput);
+      const prepared = prepareOutgoingMediaPayload(payload);
+      const response = await state.socket.sendMessage(jid, prepared.content);
+      const messageId = response?.key?.id || `local_${Date.now()}`;
+      const cachedMedia = prepared.buffer
+        ? await cacheMediaBuffer({
+            buffer: prepared.buffer,
+            config,
+            sessionId,
+            messageId,
+            media: payload.media,
+          })
+        : null;
+
+      return recordMessage(sessionId, {
+        id: messageId,
+        jid,
+        fromMe: true,
+        text: payload.text || "",
+        timestamp: Math.floor(Date.now() / 1000),
+        type: payload.media.kind,
+        status: "sent",
+        pushName: state.me?.name || state.me?.verifiedName || null,
+        participant: null,
+        media: buildOutgoingStoredMedia(payload.media, cachedMedia),
+      });
+    };
+
+    const resolveMessageMedia = async (message) => {
+      const existingFilePath = getCachedMediaAbsolutePath(config, message.media);
+      if (existingFilePath && existsSync(existingFilePath)) {
+        return {
+          filePath: existingFilePath,
+          mimeType: message.media?.mimeType || "application/octet-stream",
+        };
+      }
+
+      if (!message.media?.download) {
+        throw new Error("A midia desta mensagem nao esta disponivel.");
+      }
+
+      const waMessage = buildMediaDownloadMessage(message);
+      const context = state.socket
+        ? {
+            logger,
+            reuploadRequest: (staleMessage) => state.socket.updateMediaMessage(staleMessage),
+          }
+        : undefined;
+      const buffer = await downloadMediaMessage(waMessage, "buffer", {}, context);
+      const cachedMedia = await cacheMediaBuffer({
+        buffer,
+        config,
+        sessionId,
+        messageId: message.id,
+        media: message.media,
+      });
+
+      message.media.cachePath = cachedMedia.relativePath;
+      message.media.fileName = message.media.fileName || path.basename(cachedMedia.filePath);
+      await persistMessages();
+
+      return {
+        filePath: cachedMedia.filePath,
+        mimeType: message.media?.mimeType || "application/octet-stream",
+      };
+    };
+
+    const loadOlderMessages = async (jid, count = 80) => {
+      if (!state.socket || state.status !== "connected") {
+        throw new Error("Conecte a sessao para buscar mensagens antigas.");
+      }
+
+      const oldestMessage = getConversationMessages(sessionId, jid, stores)[0];
+      if (!oldestMessage) {
+        return {
+          requestId: null,
+          importedCount: 0,
+          requiresBootstrap: true,
+        };
+      }
+
+      const messageKey = {
+        remoteJid: oldestMessage.jid,
+        fromMe: Boolean(oldestMessage.fromMe),
+        id: oldestMessage.id,
+        participant: oldestMessage.participant || undefined,
+      };
+
+      const requestId = await state.socket.fetchMessageHistory(
+        count,
+        messageKey,
+        getMessageTimestampMs(oldestMessage),
+      );
+
+      return await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          state.pendingHistoryRequests.delete(requestId);
+          reject(new Error("O WhatsApp nao retornou mais mensagens antigas a tempo."));
+        }, 15000);
+
+        state.pendingHistoryRequests.set(requestId, {
+          resolve: (result) => {
+            clearTimeout(timeout);
+            resolve(result);
+          },
+          reject: (error) => {
+            clearTimeout(timeout);
+            reject(error);
+          },
+        });
+      });
+    };
+
+    return {
+      connect,
+      disconnect,
+      logout,
+      destroy,
+      loadOlderMessages,
+      resolveMessageMedia,
+      sendMedia,
+      sendText,
+      getSnapshot,
+    };
   };
 
-  const disconnect = async () => {
-    state.manualDisconnect = true;
-    clearReconnectTimer();
+  const getService = (sessionId) => {
+    if (!services.has(sessionId)) {
+      services.set(sessionId, createService(sessionId));
+    }
 
-    if (state.socket?.ws?.close) {
-      try {
-        state.socket.ws.close();
-      } catch (error) {
-        app.log.warn({ error }, "Falha ao fechar websocket do WhatsApp.");
+    return services.get(sessionId);
+  };
+
+  const getSessionSummary = (sessionId) => {
+    const meta = stores.sessions.sessions[sessionId];
+    if (!meta) {
+      return null;
+    }
+
+    return {
+      id: meta.id,
+      name: meta.name,
+      createdAt: meta.createdAt,
+      updatedAt: meta.updatedAt,
+      snapshot: getService(sessionId).getSnapshot(),
+      stats: getSessionStats(sessionId, stores),
+    };
+  };
+
+  const listSessions = () =>
+    Object.values(stores.sessions.sessions)
+      .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
+      .map((session) => getSessionSummary(session.id))
+      .filter(Boolean);
+
+  const createSession = async (name) => {
+    const sessionId = generateSessionId(name, stores.sessions);
+    ensureSessionMeta(stores.sessions, sessionId, {
+      name: String(name).trim(),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    ensureConversationBucket(stores.conversations, sessionId);
+
+    await fs.mkdir(path.join(config.sessionsDir, sessionId), { recursive: true });
+    await Promise.all([persistSessions(), persistConversations()]);
+
+    return getSessionSummary(sessionId);
+  };
+
+  const removeSession = async (sessionId) => {
+    const service = services.get(sessionId);
+
+    if (service) {
+      await service.destroy();
+      services.delete(sessionId);
+    } else {
+      await fs.rm(path.join(config.sessionsDir, sessionId), { recursive: true, force: true });
+    }
+
+    const keptMessages = [];
+    for (const message of stores.messages.messages) {
+      if (message.sessionId === sessionId) {
+        messageIndex.delete(getMessageSignature(message));
+        continue;
+      }
+
+      keptMessages.push(message);
+    }
+
+    stores.messages.messages = keptMessages;
+    delete stores.conversations.sessions[sessionId];
+    delete stores.sessions.sessions[sessionId];
+
+    await fs.rm(path.join(config.mediaDir, sessionId), { recursive: true, force: true });
+
+    await Promise.all([persistMessages(), persistConversations(), persistSessions()]);
+    return sessionId;
+  };
+
+  const autoConnectExistingSessions = async () => {
+    const summaries = listSessions();
+
+    for (const session of summaries) {
+      if (await hasSessionAuthFiles(path.join(config.sessionsDir, session.id))) {
+        void getService(session.id).connect().catch((error) => {
+          app.log.error({ error, sessionId: session.id }, "Falha ao conectar sessao existente.");
+        });
       }
     }
-
-    state.socket = null;
-    state.me = null;
-    state.status = "disconnected";
-    state.qrCode = null;
-    state.qrDataUrl = null;
-    state.connectedAt = null;
-
-    return getSnapshot();
   };
 
-  const logout = async () => {
-    state.manualDisconnect = true;
-    clearReconnectTimer();
-
-    if (state.socket) {
-      try {
-        await state.socket.logout();
-      } catch (error) {
-        app.log.warn({ error }, "Falha ao fazer logout do WhatsApp.");
-      }
-    }
-
-    await fs.rm(config.sessionsDir, { recursive: true, force: true });
-    await fs.mkdir(config.sessionsDir, { recursive: true });
-
-    state.socket = null;
-    state.me = null;
-    state.status = "logged_out";
-    state.qrCode = null;
-    state.qrDataUrl = null;
-    state.connectedAt = null;
-    state.lastDisconnectAt = Date.now();
-
-    return getSnapshot();
-  };
-
-  const sendText = async (jidInput, text) => {
-    if (!state.socket || state.status !== "connected") {
-      throw new Error("WhatsApp nao esta conectado.");
-    }
-
-    const jid = normalizeJidInput(jidInput);
-    const response = await state.socket.sendMessage(jid, { text });
-
-    const message = recordMessage({
-      id: response?.key?.id || `local_${Date.now()}`,
-      jid,
-      fromMe: true,
-      text,
-      timestamp: Math.floor(Date.now() / 1000),
-      type: "text",
-      status: "sent",
-      pushName: state.me?.name || state.me?.verifiedName || null,
-      participant: null,
-      conversationId: null,
-    });
-
-    return message;
+  const disconnectAll = async () => {
+    const sessionIds = Object.keys(stores.sessions.sessions);
+    await Promise.all(
+      sessionIds.map(async (sessionId) => {
+        try {
+          await getService(sessionId).disconnect();
+        } catch (error) {
+          app.log.warn({ error, sessionId }, "Falha ao encerrar sessao no shutdown.");
+        }
+      }),
+    );
   };
 
   return {
-    connect,
-    disconnect,
-    logout,
-    sendText,
-    getSnapshot,
+    hasSession: (sessionId) => Boolean(stores.sessions.sessions[sessionId]),
+    getSessionSummary,
+    listSessions,
+    createSession,
+    connect: async (sessionId) => getService(sessionId).connect(),
+    disconnect: async (sessionId) => getService(sessionId).disconnect(),
+    logout: async (sessionId) => getService(sessionId).logout(),
+    loadOlderMessages: async (sessionId, jid, count) => getService(sessionId).loadOlderMessages(jid, count),
+    removeSession,
+    resolveMessageMedia: async (sessionId, message) => getService(sessionId).resolveMessageMedia(message),
+    sendMedia: async (sessionId, jid, payload) => getService(sessionId).sendMedia(jid, payload),
+    sendText: async (sessionId, jid, text) => getService(sessionId).sendText(jid, text),
+    autoConnectExistingSessions,
+    disconnectAll,
   };
 }
 
-function buildConversationSummary(id, conversation, stores) {
-  const messages = getConversationMessages(id, stores);
-  const lastMessage = messages.at(-1);
+function listSessionConversations(sessionId, stores, { limit, search }) {
+  const bucket = ensureConversationBucket(stores.conversations, sessionId);
 
-  return {
-    id,
-    title: conversation.title || formatJidForDisplay(conversation.lastJid || conversation.jids[0]),
-    kind: conversation.kind || getConversationKind(conversation.lastJid || conversation.jids[0]),
-    jids: conversation.jids || [],
-    lastJid: conversation.lastJid || conversation.jids?.[0] || "",
-    updatedAt: conversation.updatedAt || getMessageTimestampMs(lastMessage) || Date.now(),
-    unreadCount: conversation.unreadCount || 0,
-    messageCount: messages.length,
-    lastMessagePreview: lastMessage ? getMessagePreview(lastMessage) : conversation.preview || "",
-    lastMessageAt: getMessageTimestampMs(lastMessage) || conversation.updatedAt || Date.now(),
-  };
-}
-
-function getConversationMessages(conversationId, stores) {
-  return stores.messages.messages
-    .filter((message) => {
-      if (message.conversationId === conversationId) {
+  return Object.values(bucket)
+    .map((conversation) => buildConversationSummary(conversation))
+    .filter((conversation) => {
+      if (!search) {
         return true;
       }
 
-      return stores.conversations.jidToConversationId[message.jid] === conversationId;
+      return [
+        conversation.title,
+        conversation.jid,
+        conversation.preview,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(search);
     })
+    .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0))
+    .slice(0, limit);
+}
+
+function getConversationMessages(sessionId, jid, stores) {
+  return stores.messages.messages
+    .filter((message) => message.sessionId === sessionId && message.jid === jid)
     .sort((left, right) => getMessageTimestampMs(left) - getMessageTimestampMs(right));
 }
 
-function getDashboardStats(stores) {
-  const summaries = Object.entries(stores.conversations.conversations).map(([id, conversation]) =>
-    buildConversationSummary(id, conversation, stores),
-  );
+function getConversationMessagesPage(sessionId, jid, stores, { limit, beforeId }) {
+  const messages = getConversationMessages(sessionId, jid, stores);
+  const safeLimit = Math.max(1, Number(limit || 120));
 
-  const groups = summaries.filter((conversation) => conversation.kind === "group").length;
-  const privateChats = summaries.filter((conversation) => conversation.kind === "private").length;
+  let endIndex = messages.length;
+  if (beforeId) {
+    const foundIndex = messages.findIndex((message) => message.id === beforeId);
+    endIndex = foundIndex >= 0 ? foundIndex : messages.length;
+  }
+
+  const startIndex = Math.max(0, endIndex - safeLimit);
+  const pageMessages = messages.slice(startIndex, endIndex);
 
   return {
-    conversationCount: summaries.length,
-    messageCount: stores.messages.messages.length,
-    groupCount: groups,
-    privateCount: privateChats,
-    webhookConfigured: Boolean(stores.webhook.webhookUrl),
+    messages: pageMessages,
+    hasOlder: startIndex > 0,
+    oldestMessageId: pageMessages[0]?.id || null,
+    newestMessageId: pageMessages.at(-1)?.id || null,
   };
 }
 
-function ensureConversation(jid, stores, record = {}) {
-  if (stores.conversations.jidToConversationId[jid]) {
-    return stores.conversations.jidToConversationId[jid];
+function getSessionStats(sessionId, stores) {
+  const conversations = listSessionConversations(sessionId, stores, {
+    limit: Number.MAX_SAFE_INTEGER,
+    search: "",
+  });
+  const messages = stores.messages.messages.filter((message) => message.sessionId === sessionId);
+
+  return {
+    conversationCount: conversations.length,
+    messageCount: messages.length,
+    unreadCount: conversations.reduce((total, conversation) => total + Number(conversation.unreadCount || 0), 0),
+    groupCount: conversations.filter((conversation) => conversation.kind === "group").length,
+    privateCount: conversations.filter((conversation) => conversation.kind === "private").length,
+  };
+}
+
+function getGlobalStats(stores) {
+  const sessionIds = Object.keys(stores.sessions.sessions);
+  return sessionIds.reduce(
+    (totals, sessionId) => {
+      const stats = getSessionStats(sessionId, stores);
+      totals.sessionCount += 1;
+      totals.conversationCount += stats.conversationCount;
+      totals.messageCount += stats.messageCount;
+      totals.unreadCount += stats.unreadCount;
+      return totals;
+    },
+    {
+      sessionCount: 0,
+      conversationCount: 0,
+      messageCount: 0,
+      unreadCount: 0,
+    },
+  );
+}
+
+function buildConversationSummary(conversation) {
+  return {
+    jid: conversation.jid,
+    title: conversation.title || formatJidForDisplay(conversation.jid),
+    kind: conversation.kind || getConversationKind(conversation.jid),
+    updatedAt: Number(conversation.updatedAt || Date.now()),
+    unreadCount: Number(conversation.unreadCount || 0),
+    preview: conversation.preview || "",
+    lastMessageAt: Number(conversation.lastMessageAt || conversation.updatedAt || Date.now()),
+    messageCount: Number(conversation.messageCount || 0),
+  };
+}
+
+function serializeMessageForClient(sessionId, message) {
+  return {
+    id: message.id,
+    jid: message.jid,
+    fromMe: Boolean(message.fromMe),
+    text: message.text || "",
+    timestamp: normalizeTimestamp(message.timestamp),
+    type: message.type || "text",
+    status: message.status || "stored",
+    pushName: message.pushName || null,
+    participant: message.participant || null,
+    media: serializeMediaForClient(sessionId, message),
+  };
+}
+
+function serializeMediaForClient(sessionId, message) {
+  if (!message?.media) {
+    return null;
   }
 
-  const id = `conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  stores.conversations.jidToConversationId[jid] = id;
-  stores.conversations.conversations[id] = {
-    jids: [jid],
-    lastJid: jid,
-    updatedAt: Date.now(),
-    unreadCount: record.fromMe ? 0 : 1,
-    title: record.pushName || formatJidForDisplay(jid),
-    kind: getConversationKind(jid),
-    preview: record.text || "",
+  return {
+    kind: message.media.kind,
+    mimeType: message.media.mimeType || "application/octet-stream",
+    fileName: message.media.fileName || null,
+    fileSize: Number(message.media.fileSize || 0) || null,
+    width: Number(message.media.width || 0) || null,
+    height: Number(message.media.height || 0) || null,
+    seconds: Number(message.media.seconds || 0) || null,
+    isAnimated: Boolean(message.media.isAnimated),
+    url: `/api/sessions/${encodeURIComponent(sessionId)}/media?messageId=${encodeURIComponent(message.id)}`,
   };
+}
 
-  return id;
+function findStoredMessage(sessionId, messageId, stores) {
+  return (
+    stores.messages.messages.find(
+      (message) => message.sessionId === sessionId && String(message.id) === String(messageId),
+    ) || null
+  );
+}
+
+function sendMediaFileResponse(reply, filePath, mimeType) {
+  reply.header("Cache-Control", "private, max-age=604800");
+  reply.type(mimeType || "application/octet-stream");
+  return reply.send(createReadStream(filePath));
+}
+
+function upsertConversationFromMessage(stores, sessionId, record, options = {}) {
+  const conversation = ensureConversationMeta(stores, sessionId, record.jid);
+  const timestampMs = getMessageTimestampMs(record);
+
+  conversation.title = conversation.title || record.pushName || formatJidForDisplay(record.jid);
+  conversation.kind = getConversationKind(record.jid);
+  conversation.updatedAt = timestampMs;
+  conversation.lastMessageAt = timestampMs;
+  conversation.preview = getMessagePreview(record);
+
+  if (options.incrementCount) {
+    conversation.messageCount = Number(conversation.messageCount || 0) + 1;
+  }
+
+  if (options.incrementUnread && !record.fromMe) {
+    conversation.unreadCount = Number(conversation.unreadCount || 0) + 1;
+  }
+
+  return conversation;
+}
+
+function rebuildConversationsFromMessages(stores) {
+  const previousStore = stores.conversations;
+  const rebuilt = { sessions: {} };
+
+  for (const sessionId of Object.keys(stores.sessions.sessions)) {
+    ensureConversationBucket(rebuilt, sessionId);
+  }
+
+  for (const [sessionId, sessionData] of Object.entries(previousStore.sessions || {})) {
+    const bucket = ensureConversationBucket(rebuilt, sessionId);
+    for (const [jid, conversation] of Object.entries(sessionData.conversations || {})) {
+      bucket[jid] = normalizeConversationEntry(conversation, jid);
+      bucket[jid].messageCount = 0;
+    }
+  }
+
+  const sortedMessages = [...stores.messages.messages].sort(
+    (left, right) => getMessageTimestampMs(left) - getMessageTimestampMs(right),
+  );
+
+  for (const message of sortedMessages) {
+    const sessionId = message.sessionId || DEFAULT_SESSION_ID;
+    ensureSessionMeta(stores.sessions, sessionId, {
+      name: sessionId === DEFAULT_SESSION_ID ? "Sessao principal" : formatSessionName(sessionId),
+    });
+    upsertConversationFromMessage(
+      { ...stores, conversations: rebuilt },
+      sessionId,
+      message,
+      { incrementCount: true },
+    );
+  }
+
+  stores.conversations = rebuilt;
+}
+
+function ensureConversationBucket(store, sessionId) {
+  if (!store.sessions) {
+    store.sessions = {};
+  }
+
+  if (!store.sessions[sessionId]) {
+    store.sessions[sessionId] = { conversations: {} };
+  }
+
+  if (!store.sessions[sessionId].conversations) {
+    store.sessions[sessionId].conversations = {};
+  }
+
+  return store.sessions[sessionId].conversations;
+}
+
+function ensureConversationMeta(stores, sessionId, jid) {
+  const bucket = ensureConversationBucket(stores.conversations, sessionId);
+
+  if (!bucket[jid]) {
+    bucket[jid] = normalizeConversationEntry({}, jid);
+  }
+
+  return bucket[jid];
+}
+
+function getConversationMeta(stores, sessionId, jid) {
+  return ensureConversationBucket(stores.conversations, sessionId)[jid] || null;
+}
+
+function extractHistoryChatMessages(chat) {
+  if (!Array.isArray(chat?.messages)) {
+    return [];
+  }
+
+  return chat.messages
+    .map((entry) => entry?.message || entry)
+    .filter(Boolean);
+}
+
+function extractMediaDescriptor(content) {
+  if (!content || typeof content !== "object") {
+    return null;
+  }
+
+  const definitions = [
+    ["imageMessage", "image"],
+    ["videoMessage", "video"],
+    ["audioMessage", "audio"],
+    ["documentMessage", "document"],
+    ["stickerMessage", "sticker"],
+  ];
+
+  for (const [messageType, kind] of definitions) {
+    const mediaMessage = content[messageType];
+    if (!mediaMessage) {
+      continue;
+    }
+
+    return {
+      kind,
+      mimeType: mediaMessage.mimetype || defaultMimeTypeForMediaKind(kind),
+      fileName: mediaMessage.fileName || null,
+      fileSize: Number(mediaMessage.fileLength || 0) || null,
+      width: Number(mediaMessage.width || 0) || null,
+      height: Number(mediaMessage.height || 0) || null,
+      seconds: Number(mediaMessage.seconds || 0) || null,
+      isAnimated: Boolean(mediaMessage.isAnimated),
+      cachePath: null,
+      download: normalizeStoredDownloadSource(kind, mediaMessage),
+    };
+  }
+
+  return null;
 }
 
 function normalizeIncomingMessage(message) {
@@ -766,6 +1513,7 @@ function normalizeIncomingMessage(message) {
   const content = unwrapMessageContent(message.message);
   const type = extractMessageType(content);
   const text = extractMessageText(content);
+  const media = extractMediaDescriptor(content);
 
   if (
     ["senderKeyDistributionMessage", "messageContextInfo", "protocolMessage"].includes(type) &&
@@ -784,7 +1532,7 @@ function normalizeIncomingMessage(message) {
     status: "received",
     pushName: message.pushName || null,
     participant: message.key.participant || null,
-    conversationId: null,
+    media,
   };
 }
 
@@ -811,6 +1559,14 @@ function unwrapMessageContent(message) {
 
   if (message.documentWithCaptionMessage?.message) {
     return unwrapMessageContent(message.documentWithCaptionMessage.message);
+  }
+
+  if (message.deviceSentMessage?.message) {
+    return unwrapMessageContent(message.deviceSentMessage.message);
+  }
+
+  if (message.editedMessage?.message) {
+    return unwrapMessageContent(message.editedMessage.message);
   }
 
   return message;
@@ -910,12 +1666,18 @@ function normalizeTimestamp(value) {
   return Math.floor(numeric);
 }
 
-function getMessageTimestampMs(message) {
-  if (!message) {
+function toStoreTimestampMs(value) {
+  const numeric = Number(value);
+
+  if (!Number.isFinite(numeric) || numeric <= 0) {
     return 0;
   }
 
-  const timestamp = normalizeTimestamp(message.timestamp);
+  return numeric > 1_000_000_000_000 ? Math.floor(numeric) : Math.floor(numeric * 1000);
+}
+
+function getMessageTimestampMs(message) {
+  const timestamp = normalizeTimestamp(message?.timestamp);
   return timestamp * 1000;
 }
 
@@ -932,7 +1694,12 @@ function getMessagePreview(message) {
 }
 
 function getMessageSignature(message) {
-  return [message.id, message.jid, message.fromMe ? "1" : "0"].join(":");
+  return [
+    message.sessionId || DEFAULT_SESSION_ID,
+    message.id || "",
+    message.jid || "",
+    message.fromMe ? "1" : "0",
+  ].join(":");
 }
 
 function getConversationKind(jid = "") {
@@ -986,7 +1753,6 @@ function normalizeJidInput(value) {
   }
 
   const digits = String(value).replace(/\D/g, "");
-
   if (!digits) {
     throw new Error("Numero invalido.");
   }
@@ -994,78 +1760,397 @@ function normalizeJidInput(value) {
   return `${digits}@s.whatsapp.net`;
 }
 
-function shouldForwardToWebhook(message, webhookSettings) {
-  if (!webhookSettings.webhookUrl) {
-    return false;
+function normalizeOutboundMediaInput(input) {
+  if (!input || typeof input !== "object") {
+    throw new Error("Arquivo invalido.");
   }
 
-  if (webhookSettings.webhookIgnoreFromMe && message.fromMe) {
-    return false;
+  const mimeType = String(input.mimeType || "").trim().toLowerCase();
+  const fileName = String(input.fileName || "").trim() || null;
+  const data = extractBase64Payload(input.data || "");
+  const requestedKind = String(input.kind || "auto").trim().toLowerCase();
+  const kind = inferOutboundMediaKind(requestedKind, mimeType, fileName);
+
+  if (!data) {
+    throw new Error("Arquivo em base64 nao informado.");
   }
 
-  const kind = getConversationKind(message.jid);
-
-  if (webhookSettings.webhookFilterMode === "contacts_only" && kind !== "private") {
-    return false;
-  }
-
-  if (webhookSettings.webhookFilterMode === "groups_only" && kind !== "group") {
-    return false;
-  }
-
-  if (webhookSettings.webhookFilterMode === "groups_allowlist") {
-    if (kind !== "group") {
-      return false;
-    }
-
-    if (webhookSettings.webhookGroupAllowlist.length === 0) {
-      return false;
-    }
-
-    return webhookSettings.webhookGroupAllowlist.includes(message.jid);
-  }
-
-  if (
-    kind === "group" &&
-    webhookSettings.webhookGroupAllowlist.length > 0 &&
-    !webhookSettings.webhookGroupAllowlist.includes(message.jid)
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-async function postWebhook(webhookSettings, payload) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, 15_000);
-
-  const response = await fetch(webhookSettings.webhookUrl, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-webhook-secret": webhookSettings.webhookSecret || "",
-    },
-    body: JSON.stringify(payload),
-    signal: controller.signal,
-  });
-
-  clearTimeout(timeout);
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`Webhook respondeu ${response.status}: ${body || response.statusText}`);
+  if (kind === "sticker" && mimeType && mimeType !== "image/webp") {
+    throw new Error("Para enviar sticker, use um arquivo WEBP.");
   }
 
   return {
-    status: response.status,
-    statusText: response.statusText,
+    kind,
+    mimeType: mimeType || defaultMimeTypeForMediaKind(kind),
+    fileName,
+    data,
   };
 }
 
-function normalizeMessagesStore(input) {
+function inferOutboundMediaKind(requestedKind, mimeType, fileName) {
+  if (["image", "video", "audio", "document", "sticker"].includes(requestedKind)) {
+    return requestedKind;
+  }
+
+  const extension = getFileExtension(fileName);
+  if (mimeType.startsWith("image/")) {
+    return "image";
+  }
+
+  if (mimeType.startsWith("video/")) {
+    return "video";
+  }
+
+  if (mimeType.startsWith("audio/")) {
+    return "audio";
+  }
+
+  if (mimeType) {
+    return "document";
+  }
+
+  if (["jpg", "jpeg", "png", "gif", "webp"].includes(extension)) {
+    return "image";
+  }
+
+  if (["mp4", "mov", "webm", "mkv"].includes(extension)) {
+    return "video";
+  }
+
+  if (["mp3", "ogg", "wav", "m4a", "aac"].includes(extension)) {
+    return "audio";
+  }
+
+  return "document";
+}
+
+function extractBase64Payload(value) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  if (raw.startsWith("data:")) {
+    const delimiterIndex = raw.indexOf("base64,");
+    if (delimiterIndex >= 0) {
+      return raw.slice(delimiterIndex + 7);
+    }
+  }
+
+  return raw;
+}
+
+function prepareOutgoingMediaPayload(payload) {
+  const media = payload?.media;
+  if (!media) {
+    throw new Error("Arquivo nao informado.");
+  }
+
+  const buffer = Buffer.from(media.data, "base64");
+  if (!buffer.length) {
+    throw new Error("Arquivo vazio.");
+  }
+
+  const caption = payload.text || undefined;
+  let content;
+
+  switch (media.kind) {
+    case "image":
+      content = {
+        image: buffer,
+        mimetype: media.mimeType || "image/jpeg",
+        caption,
+      };
+      break;
+    case "video":
+      content = {
+        video: buffer,
+        mimetype: media.mimeType || "video/mp4",
+        caption,
+      };
+      break;
+    case "audio":
+      content = {
+        audio: buffer,
+        mimetype: media.mimeType || "audio/ogg",
+        ptt: false,
+      };
+      break;
+    case "document":
+      content = {
+        document: buffer,
+        mimetype: media.mimeType || "application/octet-stream",
+        fileName: media.fileName || `arquivo.${guessExtensionFromMimeType(media.mimeType)}`,
+        caption,
+      };
+      break;
+    case "sticker":
+      content = {
+        sticker: buffer,
+      };
+      break;
+    default:
+      throw new Error("Tipo de arquivo nao suportado.");
+  }
+
+  return {
+    buffer,
+    content,
+  };
+}
+
+function buildOutgoingStoredMedia(media, cachedMedia) {
+  if (!media) {
+    return null;
+  }
+
+  return normalizeStoredMediaDescriptor({
+    kind: media.kind,
+    mimeType: media.mimeType,
+    fileName: media.fileName || cachedMedia?.fileName || null,
+    fileSize: null,
+    width: null,
+    height: null,
+    seconds: null,
+    isAnimated: false,
+    cachePath: cachedMedia?.relativePath || null,
+    download: null,
+  });
+}
+
+function normalizeStoredMediaDescriptor(media) {
+  if (!media || typeof media !== "object") {
+    return null;
+  }
+
+  const kind = String(media.kind || "").trim() || "document";
+  const download = media.download
+    ? {
+        mediaType: media.download.mediaType || kind,
+        mimetype: media.download.mimetype || media.mimeType || defaultMimeTypeForMediaKind(kind),
+        url: media.download.url || null,
+        directPath: media.download.directPath || null,
+        mediaKey: normalizeBase64Field(media.download.mediaKey),
+        fileEncSha256: normalizeBase64Field(media.download.fileEncSha256),
+        fileSha256: normalizeBase64Field(media.download.fileSha256),
+        fileLength: Number(media.download.fileLength || 0) || null,
+        fileName: media.download.fileName || media.fileName || null,
+      }
+    : null;
+
+  return {
+    kind,
+    mimeType: media.mimeType || defaultMimeTypeForMediaKind(kind),
+    fileName: media.fileName || null,
+    fileSize: Number(media.fileSize || 0) || null,
+    width: Number(media.width || 0) || null,
+    height: Number(media.height || 0) || null,
+    seconds: Number(media.seconds || 0) || null,
+    isAnimated: Boolean(media.isAnimated),
+    cachePath: typeof media.cachePath === "string" && media.cachePath ? media.cachePath : null,
+    download,
+  };
+}
+
+function normalizeStoredDownloadSource(kind, mediaMessage) {
+  return {
+    mediaType: kind,
+    mimetype: mediaMessage.mimetype || defaultMimeTypeForMediaKind(kind),
+    url: mediaMessage.url || null,
+    directPath: mediaMessage.directPath || null,
+    mediaKey: encodeBinaryField(mediaMessage.mediaKey),
+    fileEncSha256: encodeBinaryField(mediaMessage.fileEncSha256),
+    fileSha256: encodeBinaryField(mediaMessage.fileSha256),
+    fileLength: Number(mediaMessage.fileLength || 0) || null,
+    fileName: mediaMessage.fileName || null,
+  };
+}
+
+function normalizeBase64Field(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function encodeBinaryField(value) {
+  if (!value) {
+    return null;
+  }
+
+  return Buffer.from(value).toString("base64");
+}
+
+function decodeBinaryField(value) {
+  if (!value) {
+    return undefined;
+  }
+
+  return Buffer.from(value, "base64");
+}
+
+function buildMediaDownloadMessage(message) {
+  const media = message?.media;
+  const download = media?.download;
+  if (!media || !download) {
+    throw new Error("Mensagem sem dados de download.");
+  }
+
+  const type = mediaKindToContentType(media.kind);
+  return {
+    key: {
+      remoteJid: message.jid,
+      fromMe: Boolean(message.fromMe),
+      id: message.id,
+      participant: message.participant || undefined,
+    },
+    message: {
+      [type]: {
+        mimetype: download.mimetype || media.mimeType || defaultMimeTypeForMediaKind(media.kind),
+        url: download.url || undefined,
+        directPath: download.directPath || undefined,
+        mediaKey: decodeBinaryField(download.mediaKey),
+        fileEncSha256: decodeBinaryField(download.fileEncSha256),
+        fileSha256: decodeBinaryField(download.fileSha256),
+        fileLength: download.fileLength || undefined,
+        fileName: download.fileName || media.fileName || undefined,
+        seconds: media.seconds || undefined,
+        width: media.width || undefined,
+        height: media.height || undefined,
+        isAnimated: media.isAnimated || undefined,
+      },
+    },
+  };
+}
+
+function mediaKindToContentType(kind) {
+  const mapping = {
+    image: "imageMessage",
+    video: "videoMessage",
+    audio: "audioMessage",
+    document: "documentMessage",
+    sticker: "stickerMessage",
+  };
+
+  return mapping[kind] || "documentMessage";
+}
+
+function defaultMimeTypeForMediaKind(kind) {
+  const mapping = {
+    image: "image/jpeg",
+    video: "video/mp4",
+    audio: "audio/ogg",
+    document: "application/octet-stream",
+    sticker: "image/webp",
+  };
+
+  return mapping[kind] || "application/octet-stream";
+}
+
+function getCachedMediaAbsolutePath(config, media) {
+  if (!media?.cachePath) {
+    return null;
+  }
+
+  return path.join(config.mediaDir, media.cachePath);
+}
+
+async function cacheMediaBuffer({ buffer, config, sessionId, messageId, media }) {
+  const sessionMediaDir = path.join(config.mediaDir, sessionId);
+  await fs.mkdir(sessionMediaDir, { recursive: true });
+
+  const extension = getPreferredMediaExtension(media);
+  const fileName = `${sanitizePathSegment(messageId)}.${extension}`;
+  const filePath = path.join(sessionMediaDir, fileName);
+  await fs.writeFile(filePath, buffer);
+
+  return {
+    fileName,
+    filePath,
+    relativePath: path.join(sessionId, fileName).split(path.sep).join("/"),
+  };
+}
+
+function getPreferredMediaExtension(media) {
+  const fileNameExtension = getFileExtension(media?.fileName);
+  if (fileNameExtension) {
+    return fileNameExtension;
+  }
+
+  const mimeExtension = guessExtensionFromMimeType(media?.mimeType);
+  if (mimeExtension) {
+    return mimeExtension;
+  }
+
+  if (media?.download) {
+    try {
+      const downloadMessage = buildMediaDownloadMessage({
+        ...media,
+        id: "temp",
+        jid: "temp@s.whatsapp.net",
+        fromMe: false,
+        participant: null,
+        media,
+      });
+      return extensionForMediaMessage(downloadMessage.message) || "bin";
+    } catch {}
+  }
+
+  return "bin";
+}
+
+function getFileExtension(fileName) {
+  const extension = path.extname(String(fileName || "")).replace(/^\./, "").trim().toLowerCase();
+  return extension || "";
+}
+
+function guessExtensionFromMimeType(mimeType) {
+  const value = String(mimeType || "").trim().toLowerCase();
+  const mapping = {
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/quicktime": "mov",
+    "audio/ogg": "ogg",
+    "audio/mpeg": "mp3",
+    "audio/mp4": "m4a",
+    "audio/aac": "aac",
+    "audio/wav": "wav",
+    "application/pdf": "pdf",
+  };
+
+  return mapping[value] || "";
+}
+
+function sanitizePathSegment(value) {
+  return String(value || "arquivo")
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80) || "arquivo";
+}
+
+function serializeMe(value) {
+  if (!value) {
+    return null;
+  }
+
+  return {
+    id: value.id || "",
+    name: value.name || value.verifiedName || "",
+    lid: value.lid || "",
+  };
+}
+
+function getAccountId(value) {
+  if (!value?.id) {
+    return "";
+  }
+
+  return String(value.id);
+}
+
+function normalizeMessagesStore(input, fallbackSessionId) {
   if (!input || typeof input !== "object" || !Array.isArray(input.messages)) {
     return { messages: [] };
   }
@@ -1073,6 +2158,7 @@ function normalizeMessagesStore(input) {
   return {
     messages: input.messages.map((message) => ({
       id: message.id || `legacy_${Date.now()}`,
+      sessionId: message.sessionId || fallbackSessionId,
       jid: message.jid || "",
       fromMe: Boolean(message.fromMe),
       text: typeof message.text === "string" ? message.text : "",
@@ -1081,67 +2167,197 @@ function normalizeMessagesStore(input) {
       status: message.status || "stored",
       pushName: message.pushName || null,
       participant: message.participant || null,
-      conversationId: message.conversationId || null,
+      media: normalizeStoredMediaDescriptor(message.media),
     })),
   };
 }
 
-function normalizeConversationsStore(input) {
-  const store = {
-    jidToConversationId: {},
-    conversations: {},
-  };
+function normalizeConversationsStore(input, fallbackSessionId) {
+  const store = { sessions: {} };
 
-  if (input?.jidToConversationId && typeof input.jidToConversationId === "object") {
-    store.jidToConversationId = input.jidToConversationId;
+  if (input?.sessions && typeof input.sessions === "object") {
+    for (const [sessionId, sessionData] of Object.entries(input.sessions)) {
+      const bucket = ensureConversationBucket(store, sessionId);
+      for (const [jid, conversation] of Object.entries(sessionData?.conversations || {})) {
+        bucket[jid] = normalizeConversationEntry(conversation, jid);
+      }
+    }
+
+    return store;
   }
 
   if (input?.conversations && typeof input.conversations === "object") {
-    for (const [id, conversation] of Object.entries(input.conversations)) {
-      store.conversations[id] = {
-        jids: Array.isArray(conversation?.jids) ? conversation.jids : [],
-        lastJid: conversation?.lastJid || conversation?.jids?.[0] || "",
-        updatedAt: Number(conversation?.updatedAt || Date.now()),
-        unreadCount: Number(conversation?.unreadCount || 0),
-        title: conversation?.title || null,
-        kind: conversation?.kind || null,
-        preview: conversation?.preview || "",
-      };
+    const bucket = ensureConversationBucket(store, fallbackSessionId);
+    for (const legacyConversation of Object.values(input.conversations)) {
+      const jid = legacyConversation?.lastJid || legacyConversation?.jids?.[0];
+      if (!jid) {
+        continue;
+      }
+
+      bucket[jid] = normalizeConversationEntry(legacyConversation, jid);
     }
   }
 
   return store;
 }
 
-function normalizeWebhookSettings(input) {
-  const allowlist = Array.isArray(input?.webhookGroupAllowlist)
-    ? input.webhookGroupAllowlist
-    : String(input?.webhookGroupAllowlist || "")
-        .split("\n")
-        .map((item) => item.trim())
-        .filter(Boolean);
-
+function normalizeConversationEntry(entry, jid) {
   return {
-    webhookUrl: String(input?.webhookUrl || defaultWebhookSettings.webhookUrl || "").trim(),
-    webhookSecret: String(
-      input?.webhookSecret || defaultWebhookSettings.webhookSecret || "",
-    ).trim(),
-    webhookFilterMode: ["all", "contacts_only", "groups_only", "groups_allowlist"].includes(
-      input?.webhookFilterMode,
-    )
-      ? input.webhookFilterMode
-      : defaultWebhookSettings.webhookFilterMode,
-    webhookGroupAllowlist: allowlist,
-    webhookIgnoreFromMe:
-      typeof input?.webhookIgnoreFromMe === "boolean"
-        ? input.webhookIgnoreFromMe
-        : defaultWebhookSettings.webhookIgnoreFromMe,
+    jid,
+    title: entry?.title || formatJidForDisplay(jid),
+    kind: entry?.kind || getConversationKind(jid),
+    updatedAt: Number(entry?.updatedAt || Date.now()),
+    unreadCount: Number(entry?.unreadCount || 0),
+    preview: entry?.preview || "",
+    lastMessageAt: Number(entry?.lastMessageAt || entry?.updatedAt || Date.now()),
+    messageCount: Number(entry?.messageCount || 0),
   };
 }
 
-async function ensureDirectories() {
-  await fs.mkdir(config.dataDir, { recursive: true });
-  await fs.mkdir(config.sessionsDir, { recursive: true });
+function normalizeSessionStore(input) {
+  const store = { sessions: {} };
+
+  if (!input || typeof input !== "object" || !input.sessions || typeof input.sessions !== "object") {
+    return store;
+  }
+
+  for (const [sessionId, session] of Object.entries(input.sessions)) {
+    store.sessions[sessionId] = {
+      id: sessionId,
+      name: session?.name || formatSessionName(sessionId),
+      createdAt: Number(session?.createdAt || Date.now()),
+      updatedAt: Number(session?.updatedAt || Date.now()),
+    };
+  }
+
+  return store;
+}
+
+function ensureSessionMeta(store, sessionId, patch = {}) {
+  if (!store.sessions[sessionId]) {
+    store.sessions[sessionId] = {
+      id: sessionId,
+      name: patch.name || formatSessionName(sessionId),
+      createdAt: Number(patch.createdAt || Date.now()),
+      updatedAt: Number(patch.updatedAt || Date.now()),
+    };
+  } else {
+    store.sessions[sessionId] = {
+      ...store.sessions[sessionId],
+      ...patch,
+      id: sessionId,
+      name: patch.name || store.sessions[sessionId].name || formatSessionName(sessionId),
+    };
+  }
+
+  return store.sessions[sessionId];
+}
+
+function listSessionIdsFromMessages(messagesStore) {
+  return Array.from(
+    new Set(
+      messagesStore.messages
+        .map((message) => message.sessionId || DEFAULT_SESSION_ID)
+        .filter(Boolean),
+    ),
+  );
+}
+
+function listSessionIdsFromConversationStore(conversationsStore) {
+  return Object.keys(conversationsStore.sessions || {});
+}
+
+async function listSessionDirectories(baseDir) {
+  try {
+    const entries = await fs.readdir(baseDir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+}
+
+async function hasSessionAuthFiles(sessionDir) {
+  try {
+    const entries = await fs.readdir(sessionDir);
+    return entries.some((entry) => entry !== ".DS_Store");
+  } catch {
+    return false;
+  }
+}
+
+async function migrateLegacyAuthFiles(baseDir, preferredSessionId) {
+  const legacyNames = [
+    "creds.json",
+  ];
+
+  let entries;
+  try {
+    entries = await fs.readdir(baseDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const legacyFiles = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) =>
+      legacyNames.includes(name) ||
+      name.startsWith("app-state-sync-key-") ||
+      name.startsWith("pre-key-") ||
+      name.startsWith("session-") ||
+      name.startsWith("sender-key-"),
+    );
+
+  if (!legacyFiles.length) {
+    return null;
+  }
+
+  const targetDir = path.join(baseDir, preferredSessionId);
+  await fs.mkdir(targetDir, { recursive: true });
+
+  for (const fileName of legacyFiles) {
+    await fs.rename(path.join(baseDir, fileName), path.join(targetDir, fileName));
+  }
+
+  return preferredSessionId;
+}
+
+function formatSessionName(sessionId) {
+  const pretty = String(sessionId)
+    .replace(/[-_]+/g, " ")
+    .trim();
+
+  if (!pretty) {
+    return "Sessao";
+  }
+
+  return pretty.charAt(0).toUpperCase() + pretty.slice(1);
+}
+
+function generateSessionId(name, sessionStore) {
+  const base = slugify(name) || "sessao";
+  let candidate = base;
+  let index = 2;
+
+  while (sessionStore.sessions[candidate]) {
+    candidate = `${base}-${index}`;
+    index += 1;
+  }
+
+  return candidate;
+}
+
+function slugify(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+async function ensureDirectories(pathsToEnsure) {
+  await Promise.all(pathsToEnsure.map((target) => fs.mkdir(target, { recursive: true })));
 }
 
 async function readJson(filePath, fallback) {
