@@ -9,7 +9,7 @@ Aplicacao unica com:
 - QR Code por sessao
 - historico de conversas por sessao
 - envio e leitura de midia
-- webhook configuravel pelo painel
+- webhook configuravel por sessao no painel
 
 ## Requisitos
 
@@ -55,10 +55,10 @@ Abra `http://localhost:3000` para conversas e `http://localhost:3000/sessoes` pa
 ## Estrutura de dados
 
 - `sessions/`: autenticacao do WhatsApp por sessao
-- `data/sessions.json`: metadados das sessoes
+- `data/sessions.json`: metadados e webhook de cada sessao
 - `data/conversations.json`: resumo das conversas por sessao
 - `data/messages.json`: historico de mensagens por sessao
-- `data/settings.json`: webhook e filtros de entrega
+- `data/settings.json`: valores padrao para novas sessoes
 - `data/media/`: cache local de imagens, videos, audios, stickers e documentos
 
 ## Endpoints principais
@@ -68,6 +68,8 @@ Abra `http://localhost:3000` para conversas e `http://localhost:3000/sessoes` pa
 - `GET /api/status`
 - `GET /api/settings`
 - `PUT /api/settings`
+- `GET /api/sessions/:sessionId/settings`
+- `PUT /api/sessions/:sessionId/settings`
 - `GET /api/sessions`
 - `POST /api/sessions`
 - `GET /api/sessions/:sessionId`

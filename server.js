@@ -59,16 +59,7 @@ function getDefaultSettingsStore() {
   const webhookUrl = String(process.env.WEBHOOK_URL || "").trim();
 
   return normalizeSettingsStore({
-    webhook: {
-      enabled: parseBoolean(process.env.WEBHOOK_ENABLED, Boolean(webhookUrl)),
-      url: webhookUrl,
-      secret: String(process.env.WEBHOOK_SECRET || "").trim(),
-      allowPrivate: parseBoolean(process.env.WEBHOOK_PRIVATE, true),
-      allowGroups: parseBoolean(process.env.WEBHOOK_GROUPS, true),
-      allowNewsletters: parseBoolean(process.env.WEBHOOK_NEWSLETTERS, false),
-      allowBroadcasts: parseBoolean(process.env.WEBHOOK_BROADCASTS, false),
-      includeFromMe: parseBoolean(process.env.WEBHOOK_FROM_ME, false),
-    },
+    webhook: getDefaultWebhookSettings(webhookUrl),
   });
 }
 
@@ -77,6 +68,7 @@ const paths = {
   conversations: path.join(config.dataDir, "conversations.json"),
   sessions: path.join(config.dataDir, "sessions.json"),
   settings: path.join(config.dataDir, "settings.json"),
+  contacts: path.join(config.dataDir, "contacts.json"),
 };
 
 const app = Fastify({
@@ -100,12 +92,14 @@ const stores = {
   ),
   sessions: normalizeSessionStore(await readJson(paths.sessions, { sessions: {} })),
   settings: normalizeSettingsStore(await readJson(paths.settings, getDefaultSettingsStore())),
+  contacts: normalizeContactsStore(await readJson(paths.contacts, { sessions: {} })),
 };
 
 const knownSessionIds = new Set([
   ...Object.keys(stores.sessions.sessions),
   ...listSessionIdsFromMessages(stores.messages),
   ...listSessionIdsFromConversationStore(stores.conversations),
+  ...listSessionIdsFromContactStore(stores.contacts),
   ...(await listSessionDirectories(config.sessionsDir)),
 ]);
 
@@ -114,10 +108,14 @@ if (migratedLegacySessionId) {
 }
 
 for (const sessionId of knownSessionIds) {
-  ensureSessionMeta(stores.sessions, sessionId, {
+  const session = ensureSessionMeta(stores.sessions, sessionId, {
     name: sessionId === DEFAULT_SESSION_ID ? "Sessao principal" : formatSessionName(sessionId),
   });
+  if (!session.webhook) {
+    session.webhook = cloneWebhookSettings(stores.settings.webhook);
+  }
   ensureConversationBucket(stores.conversations, sessionId);
+  ensureContactBucket(stores.contacts, sessionId);
 }
 
 rebuildConversationsFromMessages(stores);
@@ -126,13 +124,21 @@ const writeMessages = createJsonWriter(paths.messages, app.log);
 const writeConversations = createJsonWriter(paths.conversations, app.log);
 const writeSessions = createJsonWriter(paths.sessions, app.log);
 const writeSettings = createJsonWriter(paths.settings, app.log);
+const writeContacts = createJsonWriter(paths.contacts, app.log);
 
 const persistMessages = () => writeMessages(stores.messages);
 const persistConversations = () => writeConversations(stores.conversations);
 const persistSessions = () => writeSessions(stores.sessions);
 const persistSettings = () => writeSettings(stores.settings);
+const persistContacts = () => writeContacts(stores.contacts);
 
-await Promise.all([persistMessages(), persistConversations(), persistSessions(), persistSettings()]);
+await Promise.all([
+  persistMessages(),
+  persistConversations(),
+  persistSessions(),
+  persistSettings(),
+  persistContacts(),
+]);
 
 const messageIndex = new Set(
   stores.messages.messages.map((message) => getMessageSignature(message)),
@@ -147,6 +153,7 @@ const sessionManager = createSessionManager({
   persistConversations,
   persistSessions,
   persistSettings,
+  persistContacts,
 });
 
 app.register(rateLimit, {
@@ -201,6 +208,58 @@ app.put("/api/settings", async (request, reply) => {
     return reply.code(400).send({
       error: "bad_request",
       message: errorToMessage(error) || "Nao foi possivel salvar as configuracoes.",
+    });
+  }
+});
+
+app.get("/api/sessions/:sessionId/settings", async (request, reply) => {
+  const { sessionId } = request.params;
+
+  if (!sessionManager.hasSession(sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
+  return {
+    settings: {
+      webhook: getSessionWebhookSettings(stores.sessions, sessionId),
+    },
+  };
+});
+
+app.put("/api/sessions/:sessionId/settings", async (request, reply) => {
+  const { sessionId } = request.params;
+
+  if (!sessionManager.hasSession(sessionId)) {
+    return reply.code(404).send({
+      error: "not_found",
+      message: "Sessao nao encontrada.",
+    });
+  }
+
+  try {
+    const session = ensureSessionMeta(stores.sessions, sessionId);
+    session.webhook = mergeSettingsStore(
+      {
+        webhook: session.webhook || cloneWebhookSettings(stores.settings.webhook),
+      },
+      request.body,
+    ).webhook;
+
+    await persistSessions();
+
+    return {
+      ok: true,
+      settings: {
+        webhook: getSessionWebhookSettings(stores.sessions, sessionId),
+      },
+    };
+  } catch (error) {
+    return reply.code(400).send({
+      error: "bad_request",
+      message: errorToMessage(error) || "Nao foi possivel salvar as configuracoes da sessao.",
     });
   }
 });
@@ -348,8 +407,8 @@ app.get("/api/sessions/:sessionId/conversations/:jid/messages", async (request, 
   });
 
   return {
-    conversation: buildConversationSummary(conversation),
-    messages: page.messages.map((message) => serializeMessageForClient(sessionId, message)),
+    conversation: buildConversationSummary(sessionId, conversation, stores),
+    messages: page.messages.map((message) => serializeMessageForClient(sessionId, message, stores)),
     page: {
       limit,
       hasOlder: page.hasOlder,
@@ -386,7 +445,7 @@ app.post("/api/sessions/:sessionId/conversations/:jid/history", async (request, 
       importedCount: result.importedCount,
       requestId: result.requestId,
       requiresBootstrap: Boolean(result.requiresBootstrap),
-      conversation: buildConversationSummary(getConversationMeta(stores, sessionId, jid)),
+      conversation: buildConversationSummary(sessionId, getConversationMeta(stores, sessionId, jid), stores),
     };
   } catch (error) {
     return reply.code(400).send({
@@ -419,7 +478,7 @@ app.post("/api/sessions/:sessionId/conversations/:jid/read", async (request, rep
 
   return {
     ok: true,
-    conversation: buildConversationSummary(conversation),
+    conversation: buildConversationSummary(sessionId, conversation, stores),
   };
 });
 
@@ -464,7 +523,7 @@ app.post("/api/sessions/:sessionId/messages/send", async (request, reply) => {
 
   return {
     ok: true,
-    message: serializeMessageForClient(sessionId, message),
+    message: serializeMessageForClient(sessionId, message, stores),
   };
 });
 
@@ -567,12 +626,25 @@ function createSessionManager({
   persistMessages,
   persistConversations,
   persistSessions,
+  persistContacts,
 }) {
   const services = new Map();
   const logger = Pino({ level: "silent" });
 
+  const absorbContacts = (sessionId, contacts = []) => {
+    let changed = false;
+
+    for (const contact of contacts) {
+      if (upsertContact(stores.contacts, sessionId, contact)) {
+        changed = true;
+      }
+    }
+
+    return changed;
+  };
+
   const shouldDeliverWebhookForMessage = (message) => {
-    const webhook = stores.settings?.webhook || {};
+    const webhook = getSessionWebhookSettings(stores.sessions, message?.sessionId || "");
 
     if (!webhook.enabled || !webhook.url) {
       return false;
@@ -604,7 +676,7 @@ function createSessionManager({
       return;
     }
 
-    const webhook = stores.settings.webhook;
+    const webhook = getSessionWebhookSettings(stores.sessions, sessionId);
     const conversation =
       getConversationMeta(stores, sessionId, message.jid) || normalizeConversationEntry({}, message.jid);
     const session = stores.sessions.sessions[sessionId] || ensureSessionMeta(stores.sessions, sessionId);
@@ -615,8 +687,8 @@ function createSessionManager({
         id: session.id,
         name: session.name,
       },
-      conversation: buildConversationSummary(conversation),
-      message: serializeMessageForClient(sessionId, message),
+      conversation: buildConversationSummary(sessionId, conversation, stores),
+      message: serializeMessageForClient(sessionId, message, stores),
     };
 
     const controller = new AbortController();
@@ -707,6 +779,7 @@ function createSessionManager({
   const importHistorySync = async (sessionId, event) => {
     let changed = false;
     let importedCount = 0;
+    const contactsChanged = absorbContacts(sessionId, event.contacts || []);
 
     for (const chat of event.chats || []) {
       if (!chat?.id) {
@@ -773,10 +846,10 @@ function createSessionManager({
       }
     }
 
-    if (changed) {
+    if (changed || contactsChanged) {
       const session = ensureSessionMeta(stores.sessions, sessionId);
       session.updatedAt = Date.now();
-      await Promise.all([persistMessages(), persistConversations(), persistSessions()]);
+      await Promise.all([persistMessages(), persistConversations(), persistSessions(), persistContacts()]);
     }
 
     app.log.info(
@@ -944,6 +1017,55 @@ function createSessionManager({
       }
     };
 
+    const handleContactsUpsert = async (contacts) => {
+      if (state.removed || !Array.isArray(contacts) || !contacts.length) {
+        return;
+      }
+
+      if (absorbContacts(sessionId, contacts)) {
+        await persistContacts();
+      }
+    };
+
+    const handleContactsUpdate = async (contacts) => {
+      if (state.removed || !Array.isArray(contacts) || !contacts.length) {
+        return;
+      }
+
+      const normalized = contacts.map((contact) => ({
+        id: contact.id || contact.lid || contact.jid || "",
+        lid: contact.lid || null,
+        jid: contact.jid || null,
+        name: contact.name || null,
+        notify: contact.notify || null,
+        verifiedName: contact.verifiedName || null,
+        imgUrl: contact.imgUrl,
+        status: contact.status || null,
+      }));
+
+      if (absorbContacts(sessionId, normalized)) {
+        await persistContacts();
+      }
+    };
+
+    const handlePhoneNumberShare = async (share) => {
+      if (state.removed || !share?.lid || !share?.jid) {
+        return;
+      }
+
+      if (
+        absorbContacts(sessionId, [
+          {
+            id: share.lid,
+            lid: share.lid,
+            jid: share.jid,
+          },
+        ])
+      ) {
+        await persistContacts();
+      }
+    };
+
     const connect = async () => {
       if (state.removed) {
         throw new Error("Sessao foi removida.");
@@ -991,6 +1113,15 @@ function createSessionManager({
         });
         socket.ev.on("messaging-history.set", (event) => {
           void handleHistorySync(event);
+        });
+        socket.ev.on("contacts.upsert", (contacts) => {
+          void handleContactsUpsert(contacts);
+        });
+        socket.ev.on("contacts.update", (contacts) => {
+          void handleContactsUpdate(contacts);
+        });
+        socket.ev.on("chats.phoneNumberShare", (share) => {
+          void handlePhoneNumberShare(share);
         });
         socket.ev.on("messages.upsert", (event) => {
           void handleMessagesUpsert(event);
@@ -1279,15 +1410,17 @@ function createSessionManager({
 
   const createSession = async (name) => {
     const sessionId = generateSessionId(name, stores.sessions);
-    ensureSessionMeta(stores.sessions, sessionId, {
+    const session = ensureSessionMeta(stores.sessions, sessionId, {
       name: String(name).trim(),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
+    session.webhook = cloneWebhookSettings(stores.settings.webhook);
     ensureConversationBucket(stores.conversations, sessionId);
+    ensureContactBucket(stores.contacts, sessionId);
 
     await fs.mkdir(path.join(config.sessionsDir, sessionId), { recursive: true });
-    await Promise.all([persistSessions(), persistConversations()]);
+    await Promise.all([persistSessions(), persistConversations(), persistContacts()]);
 
     return getSessionSummary(sessionId);
   };
@@ -1315,10 +1448,11 @@ function createSessionManager({
     stores.messages.messages = keptMessages;
     delete stores.conversations.sessions[sessionId];
     delete stores.sessions.sessions[sessionId];
+    delete stores.contacts.sessions[sessionId];
 
     await fs.rm(path.join(config.mediaDir, sessionId), { recursive: true, force: true });
 
-    await Promise.all([persistMessages(), persistConversations(), persistSessions()]);
+    await Promise.all([persistMessages(), persistConversations(), persistSessions(), persistContacts()]);
     return sessionId;
   };
 
@@ -1369,7 +1503,7 @@ function listSessionConversations(sessionId, stores, { limit, search }) {
   const bucket = ensureConversationBucket(stores.conversations, sessionId);
 
   return Object.values(bucket)
-    .map((conversation) => buildConversationSummary(conversation))
+    .map((conversation) => buildConversationSummary(sessionId, conversation, stores))
     .filter((conversation) => {
       if (!search) {
         return true;
@@ -1378,6 +1512,7 @@ function listSessionConversations(sessionId, stores, { limit, search }) {
       return [
         conversation.title,
         conversation.jid,
+        conversation.displayJid,
         conversation.preview,
       ]
         .filter(Boolean)
@@ -1452,10 +1587,13 @@ function getGlobalStats(stores) {
   );
 }
 
-function buildConversationSummary(conversation) {
+function buildConversationSummary(sessionId, conversation, stores) {
+  const identity = resolveConversationIdentity(stores, sessionId, conversation.jid, conversation.title);
+
   return {
     jid: conversation.jid,
-    title: conversation.title || formatJidForDisplay(conversation.jid),
+    displayJid: identity.displayJid,
+    title: identity.title,
     kind: conversation.kind || getConversationKind(conversation.jid),
     updatedAt: Number(conversation.updatedAt || Date.now()),
     unreadCount: Number(conversation.unreadCount || 0),
@@ -1465,10 +1603,16 @@ function buildConversationSummary(conversation) {
   };
 }
 
-function serializeMessageForClient(sessionId, message) {
+function serializeMessageForClient(sessionId, message, stores) {
+  const identity = resolveConversationIdentity(stores, sessionId, message.jid);
+  const participantIdentity = message.participant
+    ? resolveConversationIdentity(stores, sessionId, message.participant)
+    : null;
+
   return {
     id: message.id,
     jid: message.jid,
+    displayJid: identity.displayJid,
     fromMe: Boolean(message.fromMe),
     text: message.text || "",
     timestamp: normalizeTimestamp(message.timestamp),
@@ -1476,6 +1620,7 @@ function serializeMessageForClient(sessionId, message) {
     status: message.status || "stored",
     pushName: message.pushName || null,
     participant: message.participant || null,
+    participantDisplayJid: participantIdentity?.displayJid || null,
     media: serializeMediaForClient(sessionId, message),
   };
 }
@@ -1858,6 +2003,47 @@ function getConversationKind(jid = "") {
   }
 
   return "private";
+}
+
+function resolveConversationIdentity(stores, sessionId, jid, fallbackTitle = "") {
+  const kind = getConversationKind(jid);
+  const contact = kind === "private" ? getContactByAddress(stores.contacts, sessionId, jid) : null;
+  const resolvedJid = getPreferredContactAddress(contact, jid);
+  const displayJid = formatJidForDisplay(resolvedJid);
+  const genericFallback = formatJidForDisplay(jid);
+  const rawFallback = String(fallbackTitle || "").trim();
+  const preferredName = getPreferredContactName(contact);
+  const preservedTitle =
+    rawFallback && rawFallback !== jid && rawFallback !== genericFallback && rawFallback !== displayJid
+      ? rawFallback
+      : "";
+
+  return {
+    contact,
+    resolvedJid,
+    displayJid,
+    title: preferredName || preservedTitle || displayJid,
+  };
+}
+
+function getPreferredContactName(contact) {
+  if (!contact) {
+    return "";
+  }
+
+  return String(contact.name || contact.notify || contact.verifiedName || "").trim();
+}
+
+function getPreferredContactAddress(contact, fallbackJid) {
+  if (!contact) {
+    return fallbackJid;
+  }
+
+  const preferred = [contact.jid, contact.id, contact.lid]
+    .map((value) => String(value || "").trim())
+    .find((value) => value.includes("@") && !value.endsWith("@lid"));
+
+  return preferred || fallbackJid;
 }
 
 function formatJidForDisplay(jid = "") {
@@ -2369,10 +2555,121 @@ function normalizeSessionStore(input) {
       name: session?.name || formatSessionName(sessionId),
       createdAt: Number(session?.createdAt || Date.now()),
       updatedAt: Number(session?.updatedAt || Date.now()),
+      webhook: normalizeWebhookSettings(session?.webhook || {}),
     };
   }
 
   return store;
+}
+
+function normalizeContactsStore(input) {
+  const store = { sessions: {} };
+
+  if (!input || typeof input !== "object" || !input.sessions || typeof input.sessions !== "object") {
+    return store;
+  }
+
+  for (const [sessionId, sessionData] of Object.entries(input.sessions)) {
+    const records = sessionData?.records && typeof sessionData.records === "object"
+      ? sessionData.records
+      : sessionData?.contacts && typeof sessionData.contacts === "object"
+        ? sessionData.contacts
+        : {};
+
+    for (const contact of Object.values(records)) {
+      upsertContact(store, sessionId, contact);
+    }
+  }
+
+  return store;
+}
+
+function ensureContactBucket(store, sessionId) {
+  if (!store.sessions) {
+    store.sessions = {};
+  }
+
+  if (!store.sessions[sessionId]) {
+    store.sessions[sessionId] = {
+      records: {},
+      aliases: {},
+    };
+  }
+
+  if (!store.sessions[sessionId].records) {
+    store.sessions[sessionId].records = {};
+  }
+
+  if (!store.sessions[sessionId].aliases) {
+    store.sessions[sessionId].aliases = {};
+  }
+
+  return store.sessions[sessionId];
+}
+
+function normalizeContactEntry(entry) {
+  const id = String(entry?.id || entry?.lid || entry?.jid || "").trim();
+
+  return {
+    id,
+    lid: String(entry?.lid || "").trim() || null,
+    jid: String(entry?.jid || "").trim() || null,
+    name: String(entry?.name || "").trim() || null,
+    notify: String(entry?.notify || "").trim() || null,
+    verifiedName: String(entry?.verifiedName || "").trim() || null,
+    imgUrl:
+      typeof entry?.imgUrl === "string"
+        ? entry.imgUrl
+        : entry?.imgUrl === null
+          ? null
+          : undefined,
+    status: String(entry?.status || "").trim() || null,
+    updatedAt: Number(entry?.updatedAt || Date.now()),
+  };
+}
+
+function upsertContact(store, sessionId, contact) {
+  const normalized = normalizeContactEntry(contact);
+  if (!normalized.id) {
+    return false;
+  }
+
+  const bucket = ensureContactBucket(store, sessionId);
+  const recordId =
+    bucket.aliases[normalized.id] ||
+    bucket.aliases[normalized.lid || ""] ||
+    bucket.aliases[normalized.jid || ""] ||
+    normalized.id;
+  const previous = bucket.records[recordId] || null;
+  const draft = {
+    ...(previous || { id: recordId, updatedAt: 0 }),
+    ...Object.fromEntries(
+      Object.entries(normalized).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+    ),
+    id: recordId,
+  };
+  const changed =
+    !previous ||
+    JSON.stringify({ ...previous, updatedAt: 0 }) !== JSON.stringify({ ...draft, updatedAt: 0 });
+  const next = {
+    ...draft,
+    id: recordId,
+    updatedAt: changed ? Date.now() : Number(previous?.updatedAt || Date.now()),
+  };
+
+  bucket.records[recordId] = next;
+
+  for (const alias of [recordId, next.id, next.lid, next.jid].filter(Boolean)) {
+    bucket.aliases[alias] = recordId;
+  }
+
+  return changed;
+}
+
+function getContactByAddress(contactStore, sessionId, address) {
+  const bucket = ensureContactBucket(contactStore, sessionId);
+  const recordId = bucket.aliases[address] || null;
+  return recordId ? bucket.records[recordId] || null : null;
 }
 
 function normalizeSettingsStore(input) {
@@ -2380,14 +2677,8 @@ function normalizeSettingsStore(input) {
 
   return {
     webhook: {
-      enabled: parseBoolean(webhook.enabled, Boolean(String(webhook.url || "").trim())),
-      url: String(webhook.url || "").trim(),
-      secret: String(webhook.secret || "").trim(),
-      allowPrivate: parseBoolean(webhook.allowPrivate, true),
-      allowGroups: parseBoolean(webhook.allowGroups, true),
-      allowNewsletters: parseBoolean(webhook.allowNewsletters, false),
-      allowBroadcasts: parseBoolean(webhook.allowBroadcasts, false),
-      includeFromMe: parseBoolean(webhook.includeFromMe, false),
+      ...getDefaultWebhookSettings(),
+      ...normalizeWebhookSettings(webhook),
     },
   };
 }
@@ -2412,6 +2703,38 @@ function mergeSettingsStore(currentSettings, input) {
   return settings;
 }
 
+function getDefaultWebhookSettings(webhookUrl = String(process.env.WEBHOOK_URL || "").trim()) {
+  return normalizeWebhookSettings({
+    enabled: parseBoolean(process.env.WEBHOOK_ENABLED, Boolean(webhookUrl)),
+    url: webhookUrl,
+    secret: String(process.env.WEBHOOK_SECRET || "").trim(),
+    allowPrivate: parseBoolean(process.env.WEBHOOK_PRIVATE, true),
+    allowGroups: parseBoolean(process.env.WEBHOOK_GROUPS, true),
+    allowNewsletters: parseBoolean(process.env.WEBHOOK_NEWSLETTERS, false),
+    allowBroadcasts: parseBoolean(process.env.WEBHOOK_BROADCASTS, false),
+    includeFromMe: parseBoolean(process.env.WEBHOOK_FROM_ME, false),
+  });
+}
+
+function normalizeWebhookSettings(input) {
+  const webhook = input && typeof input === "object" ? input : {};
+
+  return {
+    enabled: parseBoolean(webhook.enabled, Boolean(String(webhook.url || "").trim())),
+    url: String(webhook.url || "").trim(),
+    secret: String(webhook.secret || "").trim(),
+    allowPrivate: parseBoolean(webhook.allowPrivate, true),
+    allowGroups: parseBoolean(webhook.allowGroups, true),
+    allowNewsletters: parseBoolean(webhook.allowNewsletters, false),
+    allowBroadcasts: parseBoolean(webhook.allowBroadcasts, false),
+    includeFromMe: parseBoolean(webhook.includeFromMe, false),
+  };
+}
+
+function cloneWebhookSettings(webhook) {
+  return normalizeWebhookSettings(webhook);
+}
+
 function normalizeWebhookUrl(value) {
   const raw = String(value || "").trim();
 
@@ -2431,6 +2754,11 @@ function normalizeWebhookUrl(value) {
   }
 
   return parsed.toString();
+}
+
+function getSessionWebhookSettings(sessionStore, sessionId) {
+  const session = sessionStore.sessions?.[sessionId] || null;
+  return cloneWebhookSettings(session?.webhook || getDefaultWebhookSettings());
 }
 
 function ensureSessionMeta(store, sessionId, patch = {}) {
@@ -2465,6 +2793,10 @@ function listSessionIdsFromMessages(messagesStore) {
 
 function listSessionIdsFromConversationStore(conversationsStore) {
   return Object.keys(conversationsStore.sessions || {});
+}
+
+function listSessionIdsFromContactStore(contactStore) {
+  return Object.keys(contactStore.sessions || {});
 }
 
 async function listSessionDirectories(baseDir) {

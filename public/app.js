@@ -296,7 +296,7 @@ function renderConversations(conversations) {
 
     const jid = document.createElement("p");
     jid.className = "card-meta";
-    jid.textContent = conversation.jid;
+    jid.textContent = conversation.displayJid || conversation.jid;
 
     const preview = document.createElement("p");
     preview.className = "preview";
@@ -383,7 +383,8 @@ function renderMessages(messages, conversation = null, options = {}) {
     conversationMeta.textContent = "Escolha uma conversa na lateral para abrir o historico.";
   } else {
     conversationTitle.textContent = conversation.title;
-    conversationMeta.textContent = `${conversation.jid} • ${conversation.messageCount} mensagens`;
+    conversationMeta.textContent =
+      `${conversation.displayJid || conversation.jid} • ${conversation.messageCount} mensagens`;
   }
 
   if (!messages.length) {

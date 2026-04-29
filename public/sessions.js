@@ -9,8 +9,10 @@ import {
 const state = {
   sessions: [],
   settings: null,
+  settingsSessionId: "",
   selectedSessionId: "",
   refreshTimer: null,
+  settingsRequestId: 0,
 };
 
 const sessionForm = document.getElementById("sessionForm");
@@ -29,6 +31,7 @@ const qrFrame = document.getElementById("qrFrame");
 const connectButton = document.getElementById("connectButton");
 const logoutButton = document.getElementById("logoutButton");
 const deleteButton = document.getElementById("deleteButton");
+const saveSettingsButton = document.getElementById("saveSettingsButton");
 const settingsForm = document.getElementById("settingsForm");
 const webhookEnabledInput = document.getElementById("webhookEnabledInput");
 const webhookUrlInput = document.getElementById("webhookUrlInput");
@@ -143,7 +146,8 @@ function bindEvents() {
 
 async function bootstrap() {
   startAutoRefresh();
-  await Promise.all([refreshSessions(true), refreshSettings()]);
+  await refreshSessions(true);
+  await refreshSettings();
 }
 
 function startAutoRefresh() {
@@ -169,6 +173,8 @@ async function refreshSessions(force = false) {
 
   state.sessions = response.data.sessions || [];
 
+  const previousSelectedSessionId = state.selectedSessionId;
+
   if (state.selectedSessionId) {
     const stillExists = state.sessions.some((session) => session.id === state.selectedSessionId);
     if (!stillExists) {
@@ -183,20 +189,46 @@ async function refreshSessions(force = false) {
   persistSelection();
   renderSessions();
   renderSelectedSession();
+
+  if (previousSelectedSessionId !== state.selectedSessionId) {
+    await refreshSettings();
+  }
 }
 
 async function refreshSettings() {
-  settingsNote.textContent = "Carregando configuracoes...";
+  const sessionId = state.selectedSessionId;
 
-  const response = await apiRequest("/api/settings");
-  if (!response.ok) {
-    settingsNote.textContent = response.error || "Falha ao carregar configuracoes.";
+  if (!sessionId) {
+    state.settingsRequestId += 1;
+    state.settings = null;
+    state.settingsSessionId = "";
+    renderSettings();
+    settingsNote.textContent = "Selecione uma sessao para editar o webhook dela.";
     return;
   }
 
+  const requestId = state.settingsRequestId + 1;
+  state.settingsRequestId = requestId;
+  settingsNote.textContent = `Carregando configuracoes da sessao ${sessionId}...`;
+
+  const response = await apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/settings`);
+  if (!response.ok) {
+    if (requestId !== state.settingsRequestId) {
+      return;
+    }
+
+    settingsNote.textContent = response.error || "Falha ao carregar configuracoes da sessao.";
+    return;
+  }
+
+  if (requestId !== state.settingsRequestId) {
+    return;
+  }
+
+  state.settingsSessionId = sessionId;
   state.settings = normalizeSettings(response.data.settings);
   renderSettings();
-  settingsNote.textContent = buildSettingsNote(state.settings);
+  settingsNote.textContent = buildSettingsNote(state.settings, sessionId);
 }
 
 function renderSessions() {
@@ -212,10 +244,7 @@ function renderSessions() {
     button.type = "button";
     button.className = `session-card${session.id === state.selectedSessionId ? " active" : ""}`;
     button.addEventListener("click", () => {
-      state.selectedSessionId = session.id;
-      persistSelection();
-      renderSessions();
-      renderSelectedSession();
+      selectSession(session.id);
     });
 
     const top = document.createElement("div");
@@ -317,26 +346,40 @@ function setButtonsDisabled(disabled) {
 }
 
 function renderSettings() {
-  const settings = normalizeSettings(state.settings);
+  const hasSelectedSession = Boolean(state.selectedSessionId);
+  const settings = hasSelectedSession ? normalizeSettings(state.settings) : normalizeSettings(null);
   const webhook = settings.webhook;
 
+  webhookEnabledInput.disabled = !hasSelectedSession;
   webhookEnabledInput.checked = Boolean(webhook.enabled);
+  webhookUrlInput.disabled = !hasSelectedSession;
   webhookUrlInput.value = webhook.url || "";
+  webhookSecretInput.disabled = !hasSelectedSession;
   webhookSecretInput.value = webhook.secret || "";
+  allowPrivateInput.disabled = !hasSelectedSession;
   allowPrivateInput.checked = Boolean(webhook.allowPrivate);
+  allowGroupsInput.disabled = !hasSelectedSession;
   allowGroupsInput.checked = Boolean(webhook.allowGroups);
+  allowNewslettersInput.disabled = !hasSelectedSession;
   allowNewslettersInput.checked = Boolean(webhook.allowNewsletters);
+  allowBroadcastsInput.disabled = !hasSelectedSession;
   allowBroadcastsInput.checked = Boolean(webhook.allowBroadcasts);
+  includeFromMeInput.disabled = !hasSelectedSession;
   includeFromMeInput.checked = Boolean(webhook.includeFromMe);
+  saveSettingsButton.disabled = !hasSelectedSession;
 
   syncSettingsFormState();
 }
 
 function syncSettingsFormState() {
-  webhookUrlInput.required = webhookEnabledInput.checked;
+  webhookUrlInput.required = Boolean(state.selectedSessionId && webhookEnabledInput.checked);
 }
 
 async function saveSettings() {
+  if (!state.selectedSessionId) {
+    return;
+  }
+
   const payload = {
     webhook: {
       enabled: webhookEnabledInput.checked,
@@ -352,10 +395,13 @@ async function saveSettings() {
 
   settingsNote.textContent = "Salvando configuracoes...";
 
-  const response = await apiRequest("/api/settings", {
-    method: "PUT",
-    body: JSON.stringify(payload),
-  });
+  const response = await apiRequest(
+    `/api/sessions/${encodeURIComponent(state.selectedSessionId)}/settings`,
+    {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    },
+  );
 
   if (!response.ok) {
     settingsNote.textContent = response.error || "Nao foi possivel salvar as configuracoes.";
@@ -392,6 +438,18 @@ function getSelectedSession() {
   return getSessionById(state.sessions, state.selectedSessionId);
 }
 
+function selectSession(sessionId) {
+  if (state.selectedSessionId === sessionId) {
+    return;
+  }
+
+  state.selectedSessionId = sessionId;
+  persistSelection();
+  renderSessions();
+  renderSelectedSession();
+  void refreshSettings();
+}
+
 function persistSelection() {
   savePanelState({
     selectedSessionId: state.selectedSessionId,
@@ -416,13 +474,17 @@ function normalizeSettings(value) {
 }
 
 function buildSettingsNote(settings) {
+  if (!state.selectedSessionId) {
+    return "Selecione uma sessao para configurar o webhook dela.";
+  }
+
   if (!settings?.webhook?.enabled) {
-    return "Webhook desativado. O payload inclui sessao, conversa e mensagem.";
+    return `Webhook desativado para a sessao ${state.selectedSessionId}.`;
   }
 
   if (!settings.webhook.url) {
-    return "Webhook ativo, mas sem URL configurada.";
+    return `Webhook ativo, mas sem URL configurada para a sessao ${state.selectedSessionId}.`;
   }
 
-  return "Webhook ativo. Novas mensagens serao enviadas para a URL configurada.";
+  return `Webhook ativo para a sessao ${state.selectedSessionId}. Novas mensagens serao enviadas para a URL configurada.`;
 }
